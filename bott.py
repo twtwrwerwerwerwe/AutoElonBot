@@ -1,7 +1,7 @@
 # =====================================================
 # MULTI SESSION TELEGRAM BOT (ULTIMATE FULL)
 # Aiogram 2.25.1 + Telethon
-# ADMIN TASDIQLASH (2 ADMIN)
+# ADMIN TASDIQLASH (2 ADMIN, 1 tasdiq yetarli)
 # =====================================================
 
 import os, asyncio, sqlite3, random
@@ -26,7 +26,7 @@ dp = Dispatcher(bot, storage=MemoryStorage())
 
 running_tasks = {}
 running_clients = {}
-pending_admins = {}  # {user_id: {admin_id: True/False}}
+pending_admins = {}  # {user_id: {"approved_by": set(), "status": "pending"}}
 approved_users = set()  # tasdiqlangan foydalanuvchilar
 
 # ================= DATABASE =================
@@ -70,12 +70,18 @@ async def main_menu(msg):
 
 # ================= ADMIN TASDIQLASH =================
 async def request_admin(user_id):
-    pending_admins[user_id] = {a: False for a in ADMINS}
+    pending_admins[user_id] = {"approved_by": set(), "status": "pending"}
     kb = types.InlineKeyboardMarkup()
     kb.add(types.InlineKeyboardButton("✅ Tasdiqlayman", callback_data=f"approve:{user_id}"))
+    kb.add(types.InlineKeyboardButton("❌ Rad etaman", callback_data=f"reject:{user_id}"))
     for admin in ADMINS:
         try:
-            await bot.send_message(admin, f"Foydalanuvchi [{user_id}](tg://user?id={user_id}) botni ishlatmoqchi. Tasdiqlaysizmi?", parse_mode="Markdown", reply_markup=kb)
+            await bot.send_message(
+                admin,
+                f"Foydalanuvchi [{user_id}](tg://user?id={user_id}) botni ishlatmoqchi. Tasdiqlaysizmi?",
+                parse_mode="Markdown",
+                reply_markup=kb
+            )
         except Exception as e:
             print(f"Adminga xabar yuborishda xato: {admin}, {e}")
 
@@ -85,15 +91,35 @@ async def approve_user(call: types.CallbackQuery):
     if user_id not in pending_admins:
         await call.answer("❌ Foydalanuvchi kutish ro‘yxatda yo‘q")
         return
-    pending_admins[user_id][call.from_user.id] = True
+    pending_admins[user_id]["approved_by"].add(call.from_user.id)
     await call.answer("✅ Siz tasdiqladingiz")
-    if all(pending_admins[user_id].values()):
+
+    # 1 admin tasdiqlasa darhol foydalanuvchi kiradi
+    if pending_admins[user_id]["status"] == "pending":
         approved_users.add(user_id)
-        del pending_admins[user_id]
+        pending_admins[user_id]["status"] = "approved"
         try:
             await bot.send_message(user_id, "✅ Siz tasdiqlandingiz! Botdan foydalanishingiz mumkin.")
         except Exception as e:
             print(f"Foydalanuvchiga xabar yuborishda xato: {user_id}, {e}")
+
+        # Ikkinchi admin uchun ham avtomatik "tasdiqlandi"
+        for admin in ADMINS:
+            pending_admins[user_id]["approved_by"].add(admin)
+
+@dp.callback_query_handler(lambda c: c.data.startswith("reject:"))
+async def reject_user(call: types.CallbackQuery):
+    user_id = int(call.data.split(":")[1])
+    if user_id not in pending_admins:
+        await call.answer("❌ Foydalanuvchi kutish ro‘yxatda yo‘q")
+        return
+    pending_admins[user_id]["status"] = "rejected"
+    del pending_admins[user_id]
+    await call.answer("❌ Siz rad etdiniz. Foydalanuvchi rad qilindi")
+    try:
+        await bot.send_message(user_id, "❌ Sizni admin rad qildi. Botga kirish mumkin emas.")
+    except Exception as e:
+        print(f"Foydalanuvchiga xabar yuborishda xato: {user_id}, {e}")
 
 # ================= RESET / START =================
 @dp.message_handler(commands=['start'])
