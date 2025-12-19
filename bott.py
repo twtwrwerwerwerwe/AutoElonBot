@@ -17,7 +17,7 @@ BOT_TOKEN = "8396193031:AAGzjseC_1qASNy6bWNkI4BTQnRXaiGV6eg"
 API_ID = 32460736
 API_HASH = "285e2a8556652e6f4ffdb83658081031"
 
-ADMINS = [6302873072, 6731395876]  # adminlar IDlari
+ADMINS = [6302873072]  # adminlar IDlari
 
 DB = "bot.db"
 SESS_DIR = "sessions"
@@ -74,39 +74,72 @@ async def main_menu(msg):
     await msg.answer("🏠 Asosiy menyu", reply_markup=kb)
 
 # ================= ADMIN =================
-async def send_admin_request(user_id):
+# ================= ADMIN REQUEST =================
+async def send_admin_request(user_id: int):
+    """
+    Foydalanuvchi botga kirishni so'raganda adminlarga xabar yuboradi
+    va foydalanuvchiga tasdiqlash yuborilganini bildiradi.
+    """
     kb = types.InlineKeyboardMarkup()
     kb.add(
         types.InlineKeyboardButton("✅ Tasdiqlash", callback_data=f"approve:{user_id}"),
         types.InlineKeyboardButton("❌ Rad etish", callback_data=f"reject:{user_id}")
     )
+
     pending_requests[user_id] = []
+    successful_admins = []
+
     for admin in ADMINS:
-        m = await bot.send_message(
-            admin,
-            f"👤 Foydalanuvchi <a href='tg://user?id={user_id}'>{user_id}</a> botga kirishni so‘rayapti",
-            parse_mode="HTML",
-            reply_markup=kb
-        )
-        pending_requests[user_id].append((admin, m.message_id))
+        try:
+            msg = await bot.send_message(
+                admin,
+                f"👤 Foydalanuvchi <a href='tg://user?id={user_id}'>{user_id}</a> botga kirishni so‘rayapti",
+                parse_mode="HTML",
+                reply_markup=kb
+            )
+            pending_requests[user_id].append((admin, msg.message_id))
+            successful_admins.append(str(admin))
+        except Exception as e:
+            print(f"❌ Adminga xabar yuborib bo‘lmadi ({admin}): {e}")
+
+    if successful_admins:
+        await bot.send_message(user_id, f"✅ Sorov adminlarga yuborildi: {', '.join(successful_admins)}")
+    else:
+        await bot.send_message(user_id, "❌ Adminlarga sorov yuborib bo‘lmadi. Keyinroq urinib ko‘ring.")
+
 
 @dp.callback_query_handler(lambda c: c.data.startswith(("approve:", "reject:")))
 async def admin_decision(call: types.CallbackQuery):
+    """
+    Admin sorovni tasdiqlash yoki rad etish tugmasini bosganda ishlaydi.
+    """
     action, uid = call.data.split(":")
     uid = int(uid)
+
     if uid not in pending_requests:
         await call.answer("⛔ Allaqachon hal qilingan")
         return
+
     text = "✅ Tasdiqlandi" if action == "approve" else "❌ Rad etildi"
+
+    # Admin xabarlarini tahrirlash
     for admin_id, msg_id in pending_requests[uid]:
-        try: await bot.edit_message_text(text, admin_id, msg_id)
-        except: pass
+        try:
+            await bot.edit_message_text(text, admin_id, msg_id)
+        except Exception:
+            pass
+
+    # Foydalanuvchiga natija yuborish
     if action == "approve":
         approved_users.add(uid)
         await bot.send_message(uid, "✅ Siz tasdiqlandingiz. Botdan foydalanishingiz mumkin.")
     else:
         await bot.send_message(uid, "❌ Siz admin tomonidan rad etildingiz.")
+
+    # Pending requestni tozalash
     del pending_requests[uid]
+
+    # Callback tugmasini tasdiqlash
     await call.answer("✔️ Bajarildi")
 
 # ================= START =================
