@@ -285,6 +285,17 @@ async def load_groups(call: types.CallbackQuery):
 async def add_group(call: types.CallbackQuery):
     _, sess, gid = call.data.split(":")
     gid = int(gid)
+    user_id = call.from_user.id
+
+    with db() as c:
+        exists = c.execute(
+            "SELECT 1 FROM selected_groups WHERE user_id=? AND session=? AND group_id=?",
+            (user_id, sess, gid)
+        ).fetchone()
+
+    if exists:
+        await call.answer("✔️ Allaqachon tanlangan")
+        return
 
     client = TelegramClient(f"{SESS_DIR}/{sess}", API_ID, API_HASH)
     await client.start()
@@ -294,11 +305,17 @@ async def add_group(call: types.CallbackQuery):
 
     with db() as c:
         c.execute(
-            "INSERT OR IGNORE INTO selected_groups VALUES (?,?,?,?)",
-            (call.from_user.id, sess, gid, title)
+            "INSERT INTO selected_groups VALUES (?,?,?,?)",
+            (user_id, sess, gid, title)
         )
 
-    await call.answer("✅ Guruh qo‘shildi")
+    # 🔁 TUGMANI YANGILASH (✅ qo‘shiladi)
+    new_text = "✅ " + call.message.reply_markup.inline_keyboard[
+        call.message.reply_markup.inline_keyboard.index([call.data])
+        ][0].text if not call.message.text.startswith("✅") else call.message.text
+
+    await call.answer("✅ Tanlandi")
+
 
 
 # =====================================================
