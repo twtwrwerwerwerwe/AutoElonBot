@@ -282,20 +282,16 @@ async def load_groups(call: types.CallbackQuery):
     await client.disconnect()
 
 @dp.callback_query_handler(lambda c: c.data.startswith("addgrp:"))
-async def add_group(call: types.CallbackQuery):
+async def toggle_group(call: types.CallbackQuery):
     _, sess, gid = call.data.split(":")
     gid = int(gid)
     user_id = call.from_user.id
 
     with db() as c:
-        exists = c.execute(
+        row = c.execute(
             "SELECT 1 FROM selected_groups WHERE user_id=? AND session=? AND group_id=?",
             (user_id, sess, gid)
         ).fetchone()
-
-    if exists:
-        await call.answer("✔️ Allaqachon tanlangan")
-        return
 
     client = TelegramClient(f"{SESS_DIR}/{sess}", API_ID, API_HASH)
     await client.start()
@@ -303,18 +299,34 @@ async def add_group(call: types.CallbackQuery):
     title = entity.title
     await client.disconnect()
 
-    with db() as c:
-        c.execute(
-            "INSERT INTO selected_groups VALUES (?,?,?,?)",
-            (user_id, sess, gid, title)
-        )
+    if row:
+        # ❌ olib tashlash
+        with db() as c:
+            c.execute(
+                "DELETE FROM selected_groups WHERE user_id=? AND session=? AND group_id=?",
+                (user_id, sess, gid)
+            )
+        prefix = ""
+        await call.answer("❌ Olib tashlandi")
+    else:
+        # ✅ qo‘shish
+        with db() as c:
+            c.execute(
+                "INSERT INTO selected_groups VALUES (?,?,?,?)",
+                (user_id, sess, gid, title)
+            )
+        prefix = "✅ "
+        await call.answer("✅ Tanlandi")
 
-    # 🔁 TUGMANI YANGILASH (✅ qo‘shiladi)
-    new_text = "✅ " + call.message.reply_markup.inline_keyboard[
-        call.message.reply_markup.inline_keyboard.index([call.data])
-        ][0].text if not call.message.text.startswith("✅") else call.message.text
+    # 🔁 TUGMANI YANGILASH
+    kb = call.message.reply_markup
+    for row_btn in kb.inline_keyboard:
+        btn = row_btn[0]
+        if btn.callback_data == call.data:
+            btn.text = prefix + title[:30]
 
-    await call.answer("✅ Tanlandi")
+    await call.message.edit_reply_markup(reply_markup=kb)
+
 
 
 
@@ -359,27 +371,29 @@ async def send_get_text(msg, state):
 async def send_choose_interval(msg, state):
     await state.update_data(text=msg.text)
 
-    kb = types.InlineKeyboardMarkup(row_width=2)
-    kb.add(
-        types.InlineKeyboardButton("⏱ 5 min", callback_data="send_int:5"),
-        types.InlineKeyboardButton("⏱ 10 min", callback_data="send_int:10"),
-        types.InlineKeyboardButton("⏱ 15 min", callback_data="send_int:15"),
-        types.InlineKeyboardButton("⏱ 20 min", callback_data="send_int:20"),
-    )
+    kb = types.ReplyKeyboardMarkup(resize_keyboard=True)
+    kb.add("⏱ 5", "⏱ 10")
+    kb.add("⏱ 15", "⏱ 20")
+    kb.add("⬅️ Orqaga")
 
-    await msg.answer("⏱ Intervalni tanlang:", reply_markup=kb)
+    await msg.answer("⏱ Intervalni tanlang (daqiqada):", reply_markup=kb)
+    await SendFlow.interval.set()
 
 
-@dp.callback_query_handler(lambda c: c.data.startswith("send_int:"))
-async def send_start_loop(call: types.CallbackQuery):
-    interval = int(call.data.split(":")[1])
-    user_id = call.from_user.id
 
-    state = dp.current_state(user=user_id)
+@dp.message_handler(state=SendFlow.interval)
+async def start_sending(msg, state):
+    if msg.text == "⬅️ Orqaga":
+        await state.finish()
+        await main_menu(msg)
+        return
+
+    interval = int(msg.text.replace("⏱", "").strip())
     data = await state.get_data()
 
     session = data["session"]
     text = data["text"]
+    user_id = msg.from_user.id
 
     with db() as c:
         groups = c.execute(
@@ -388,7 +402,7 @@ async def send_start_loop(call: types.CallbackQuery):
         ).fetchall()
 
     if not groups:
-        await call.answer("❌ Bu sessionda guruh tanlanmagan", show_alert=True)
+        await msg.answer("❌ Guruh tanlanmagan")
         return
 
     client = TelegramClient(f"{SESS_DIR}/{session}", API_ID, API_HASH)
@@ -408,9 +422,9 @@ async def send_start_loop(call: types.CallbackQuery):
     running_tasks[user_id] = asyncio.create_task(loop())
 
     await state.finish()
-    await call.message.edit_text("▶️ Yuborish boshlandi")
-    await main_menu(call.message)
-    await call.answer()
+    await msg.answer("▶️ Yuborish boshlandi")
+    await main_menu(msg)
+
 
 
 # ================= STOP =================
