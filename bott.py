@@ -81,8 +81,8 @@ async def send_admin_request(user_id):
     for admin in ADMINS:
         m = await bot.send_message(
             admin,
-            f"👤 Foydalanuvchi `{user_id}` botga kirishni so‘rayapti",
-            parse_mode="Markdown",
+            f"👤 Foydalanuvchi <a href='tg://user?id={user_id}'>{user_id}</a> botga kirishni so‘rayapti",
+            parse_mode="HTML",
             reply_markup=kb
         )
         pending_requests[user_id].append((admin, m.message_id))
@@ -259,7 +259,7 @@ async def load_groups(call: types.CallbackQuery):
     client = TelegramClient(f"{SESS_DIR}/{sess}", API_ID, API_HASH)
     await client.start()
 
-    dialogs = await client.get_dialogs(limit=None)
+    dialogs = await client.get_dialogs(limit=300)
 
     with db() as c:
         added = {g[0] for g in c.execute(
@@ -308,9 +308,10 @@ async def add_group(call: types.CallbackQuery):
 async def send_start(msg):
     with db() as c:
         sessions = c.execute(
-            "SELECT DISTINCT session FROM selected_groups WHERE user_id=?",
+            "SELECT session FROM numbers WHERE user_id=?",
             (msg.from_user.id,)
         ).fetchall()
+
 
     kb = types.ReplyKeyboardMarkup(resize_keyboard=True)
     for s in sessions:
