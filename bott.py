@@ -3,12 +3,14 @@
 # Aiogram 2.25.1 + Telethon
 # =====================================================
 
-import os, asyncio, sqlite3, random
+import os
+import asyncio
+import sqlite3
+import random
 from aiogram import Bot, Dispatcher, executor, types
 from aiogram.contrib.fsm_storage.memory import MemoryStorage
 from aiogram.dispatcher import FSMContext
 from aiogram.dispatcher.filters.state import State, StatesGroup
-
 from telethon import TelegramClient
 from telethon.errors import FloodWaitError, SessionPasswordNeededError
 
@@ -16,7 +18,6 @@ from telethon.errors import FloodWaitError, SessionPasswordNeededError
 BOT_TOKEN = "8291345152:AAEeOP-2U9AfYvwCFnxrwDoFg7sjyWGwqGk"
 API_ID = 32460736
 API_HASH = "285e2a8556652e6f4ffdb83658081031"
-
 ADMINS = [6302873072, 6731395876]
 
 DB = "bot.db"
@@ -28,7 +29,7 @@ dp = Dispatcher(bot, storage=MemoryStorage())
 
 # ================= GLOBALS =================
 approved_users = set()
-pending_requests = {}      # user_id -> [(admin_id, msg_id)]
+pending_requests = {}  # user_id -> [(admin_id, msg_id)]
 running_tasks = {}
 running_clients = {}
 
@@ -75,9 +76,7 @@ async def send_admin_request(user_id):
         types.InlineKeyboardButton("✅ Tasdiqlash", callback_data=f"approve:{user_id}"),
         types.InlineKeyboardButton("❌ Rad etish", callback_data=f"reject:{user_id}")
     )
-
     pending_requests[user_id] = []
-
     for admin in ADMINS:
         m = await bot.send_message(
             admin,
@@ -91,30 +90,20 @@ async def send_admin_request(user_id):
 async def admin_decision(call: types.CallbackQuery):
     action, uid = call.data.split(":")
     uid = int(uid)
-
     if uid not in pending_requests:
         await call.answer("⛔ Allaqachon hal qilingan")
         return
-
     text = "✅ Tasdiqlandi" if action == "approve" else "❌ Rad etildi"
-
-    # Inline tugmalarni HAMMA ADMINDAN o‘chirish
     for admin_id, msg_id in pending_requests[uid]:
         try:
-            await bot.edit_message_text(
-                text,
-                admin_id,
-                msg_id
-            )
+            await bot.edit_message_text(text, admin_id, msg_id)
         except:
             pass
-
     if action == "approve":
         approved_users.add(uid)
         await bot.send_message(uid, "✅ Siz tasdiqlandingiz. Botdan foydalanishingiz mumkin.")
     else:
         await bot.send_message(uid, "❌ Siz admin tomonidan rad etildingiz.")
-
     del pending_requests[uid]
     await call.answer("✔️ Bajarildi")
 
@@ -200,7 +189,6 @@ async def get_password(msg, state):
         return
     finally:
         await client.disconnect()
-
     await state.finish()
     await main_menu(msg)
 
@@ -209,33 +197,26 @@ async def get_password(msg, state):
 async def delete_session(msg):
     with db() as c:
         rows = c.execute("SELECT session FROM numbers WHERE user_id=?", (msg.from_user.id,)).fetchall()
-
     kb = types.InlineKeyboardMarkup()
     for s in rows:
         kb.add(types.InlineKeyboardButton(f"❌ {s[0]}", callback_data=f"delsess:{s[0]}"))
     kb.add(types.InlineKeyboardButton("⬅️ Orqaga", callback_data="back"))
-
     await msg.answer("🗑 O‘chiriladigan sessionni tanlang", reply_markup=kb)
 
 @dp.callback_query_handler(lambda c: c.data.startswith("delsess:"))
 async def confirm_delete(call: types.CallbackQuery):
     sess = call.data.split(":")[1]
-
     if call.from_user.id in running_tasks:
         running_tasks[call.from_user.id].cancel()
-
     if call.from_user.id in running_clients:
         await running_clients[call.from_user.id].disconnect()
-
     with db() as c:
         c.execute("DELETE FROM numbers WHERE session=?", (sess,))
         c.execute("DELETE FROM selected_groups WHERE session=?", (sess,))
-
     try:
         os.remove(f"{SESS_DIR}/{sess}.session")
     except:
         pass
-
     await call.message.edit_text("✅ Session o‘chirildi")
 
 # =====================================================
@@ -245,12 +226,13 @@ async def confirm_delete(call: types.CallbackQuery):
 async def groups_menu(msg):
     with db() as c:
         sessions = c.execute("SELECT session FROM numbers WHERE user_id=?", (msg.from_user.id,)).fetchall()
-
+    if not sessions:
+        await msg.answer("❌ Sizda hech qanday session yo‘q")
+        return
     kb = types.InlineKeyboardMarkup()
     for s in sessions:
         kb.add(types.InlineKeyboardButton(s[0], callback_data=f"loadgrp:{s[0]}"))
     kb.add(types.InlineKeyboardButton("⬅️ Orqaga", callback_data="back"))
-
     await msg.answer("📂 Session tanlang", reply_markup=kb)
 
 @dp.callback_query_handler(lambda c: c.data.startswith("loadgrp:"))
@@ -258,25 +240,17 @@ async def load_groups(call: types.CallbackQuery):
     sess = call.data.split(":")[1]
     client = TelegramClient(f"{SESS_DIR}/{sess}", API_ID, API_HASH)
     await client.start()
-
     dialogs = await client.get_dialogs(limit=None)
-
     with db() as c:
         added = {g[0] for g in c.execute(
             "SELECT group_id FROM selected_groups WHERE user_id=? AND session=?",
             (call.from_user.id, sess)
         )}
-
     kb = types.InlineKeyboardMarkup(row_width=1)
     for d in dialogs:
         if d.is_group or d.is_channel:
             mark = "✅ " if d.id in added else ""
-            kb.add(types.InlineKeyboardButton(
-                f"{mark}{d.name[:30]}",
-                callback_data=f"addgrp:{sess}:{d.id}"
-            ))
-
-
+            kb.add(types.InlineKeyboardButton(f"{mark}{d.name[:30]}", callback_data=f"addgrp:{sess}:{d.id}"))
     kb.add(types.InlineKeyboardButton("⬅️ Orqaga", callback_data="back"))
     await call.message.edit_text("👥 Guruhlar ro‘yxati", reply_markup=kb)
     await client.disconnect()
@@ -285,21 +259,17 @@ async def load_groups(call: types.CallbackQuery):
 async def add_group(call: types.CallbackQuery):
     _, sess, gid = call.data.split(":")
     gid = int(gid)
-
     client = TelegramClient(f"{SESS_DIR}/{sess}", API_ID, API_HASH)
     await client.start()
     entity = await client.get_entity(gid)
     title = entity.title
     await client.disconnect()
-
     with db() as c:
         c.execute(
             "INSERT OR IGNORE INTO selected_groups VALUES (?,?,?,?)",
             (call.from_user.id, sess, gid, title)
         )
-
     await call.answer("✅ Guruh qo‘shildi")
-
 
 # =====================================================
 # ================= ✉️ HABAR YUBORISH =================
@@ -311,12 +281,10 @@ async def send_start(msg):
             "SELECT DISTINCT session FROM selected_groups WHERE user_id=?",
             (msg.from_user.id,)
         ).fetchall()
-
     kb = types.ReplyKeyboardMarkup(resize_keyboard=True)
     for s in sessions:
         kb.add(s[0])
     kb.add("⬅️ Orqaga")
-
     await msg.answer("📂 Session tanlang", reply_markup=kb)
     await SendFlow.session.set()
 
@@ -339,14 +307,21 @@ async def get_interval(msg, state):
 @dp.message_handler(state=SendFlow.interval)
 async def start_sending(msg, state):
     d = await state.get_data()
-    interval = int(msg.text)
-
+    try:
+        interval = int(msg.text)
+    except:
+        await msg.answer("❌ Iltimos, son kiriting (5, 10, 15)")
+        return
     with db() as c:
         groups = c.execute(
             "SELECT group_id FROM selected_groups WHERE user_id=? AND session=?",
             (msg.from_user.id, d['session'])
         ).fetchall()
-
+    if not groups:
+        await msg.answer("❌ Hech qanday guruh tanlanmagan")
+        await state.finish()
+        await main_menu(msg)
+        return
     client = TelegramClient(f"{SESS_DIR}/{d['session']}", API_ID, API_HASH)
     await client.start()
     running_clients[msg.from_user.id] = client
