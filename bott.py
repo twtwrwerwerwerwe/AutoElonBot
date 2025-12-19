@@ -14,11 +14,11 @@ from telethon import TelegramClient
 from telethon.errors import FloodWaitError, SessionPasswordNeededError
 
 # ================= CONFIG =================
-BOT_TOKEN = "TOKEN"
-API_ID = 123456
-API_HASH = "API_HASH"
+BOT_TOKEN = "8291345152:AAEeOP-2U9AfYvwCFnxrwDoFg7sjyWGwqGk"
+API_ID = 32460736
+API_HASH = "285e2a8556652e6f4ffdb83658081031"
 
-ADMINS = [11111111, 22222222]
+ADMINS = [6302873072, 6731395876]
 
 DB = "bot.db"
 SESS_DIR = "sessions"
