@@ -273,8 +273,9 @@ async def load_groups(call: types.CallbackQuery):
             mark = "✅ " if d.id in added else ""
             kb.add(types.InlineKeyboardButton(
                 f"{mark}{d.name[:30]}",
-                callback_data=f"addgrp:{sess}:{d.id}:{d.name[:30]}"
+                callback_data=f"addgrp:{sess}:{d.id}"
             ))
+
 
     kb.add(types.InlineKeyboardButton("⬅️ Orqaga", callback_data="back"))
     await call.message.edit_text("👥 Guruhlar ro‘yxati", reply_markup=kb)
@@ -282,13 +283,23 @@ async def load_groups(call: types.CallbackQuery):
 
 @dp.callback_query_handler(lambda c: c.data.startswith("addgrp:"))
 async def add_group(call: types.CallbackQuery):
-    _, sess, gid, title = call.data.split(":", 3)
+    _, sess, gid = call.data.split(":")
+    gid = int(gid)
+
+    client = TelegramClient(f"{SESS_DIR}/{sess}", API_ID, API_HASH)
+    await client.start()
+    entity = await client.get_entity(gid)
+    title = entity.title
+    await client.disconnect()
+
     with db() as c:
         c.execute(
             "INSERT OR IGNORE INTO selected_groups VALUES (?,?,?,?)",
-            (call.from_user.id, sess, int(gid), title)
+            (call.from_user.id, sess, gid, title)
         )
+
     await call.answer("✅ Guruh qo‘shildi")
+
 
 # =====================================================
 # ================= ✉️ HABAR YUBORISH =================
