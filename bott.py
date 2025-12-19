@@ -259,7 +259,7 @@ async def load_groups(call: types.CallbackQuery):
     client = TelegramClient(f"{SESS_DIR}/{sess}", API_ID, API_HASH)
     await client.start()
 
-    dialogs = await client.get_dialogs(limit=300)
+    dialogs = await client.get_dialogs(limit=100)
 
     with db() as c:
         added = {g[0] for g in c.execute(
@@ -304,6 +304,7 @@ async def add_group(call: types.CallbackQuery):
 # =====================================================
 # ================= ✉️ HABAR YUBORISH =================
 # =====================================================
+
 @dp.message_handler(lambda m: m.text == "✉️ Habar yuborish")
 async def send_start(msg):
     with db() as c:
@@ -312,60 +313,88 @@ async def send_start(msg):
             (msg.from_user.id,)
         ).fetchall()
 
+    if not sessions:
+        await msg.answer("❌ Avval session qo‘shing")
+        return
 
     kb = types.ReplyKeyboardMarkup(resize_keyboard=True)
-    for s in sessions:
-        kb.add(s[0])
+    for (sess,) in sessions:
+        kb.add(sess)
     kb.add("⬅️ Orqaga")
 
-    await msg.answer("📂 Session tanlang", reply_markup=kb)
+    await msg.answer("📂 Session tanlang:", reply_markup=kb)
     await SendFlow.session.set()
 
+
 @dp.message_handler(state=SendFlow.session)
-async def get_text(msg, state):
+async def send_get_text(msg, state):
     if msg.text == "⬅️ Orqaga":
         await state.finish()
         await main_menu(msg)
         return
+
     await state.update_data(session=msg.text)
-    await msg.answer("✏️ Habar matni:")
+    await msg.answer("✏️ Habar matnini kiriting:")
     await SendFlow.text.set()
 
-@dp.message_handler(state=SendFlow.text)
-async def get_interval(msg, state):
-    await state.update_data(text=msg.text)
-    await msg.answer("⏱ Interval (min): 5 / 10 / 15")
-    await SendFlow.interval.set()
 
-@dp.message_handler(state=SendFlow.interval)
-async def start_sending(msg, state):
-    d = await state.get_data()
-    interval = int(msg.text)
+@dp.message_handler(state=SendFlow.text)
+async def send_choose_interval(msg, state):
+    await state.update_data(text=msg.text)
+
+    kb = types.InlineKeyboardMarkup(row_width=2)
+    kb.add(
+        types.InlineKeyboardButton("⏱ 5 min", callback_data="send_int:5"),
+        types.InlineKeyboardButton("⏱ 10 min", callback_data="send_int:10"),
+        types.InlineKeyboardButton("⏱ 15 min", callback_data="send_int:15"),
+        types.InlineKeyboardButton("⏱ 20 min", callback_data="send_int:20"),
+    )
+
+    await msg.answer("⏱ Intervalni tanlang:", reply_markup=kb)
+
+
+@dp.callback_query_handler(lambda c: c.data.startswith("send_int:"))
+async def send_start_loop(call: types.CallbackQuery):
+    interval = int(call.data.split(":")[1])
+    user_id = call.from_user.id
+
+    state = dp.current_state(user=user_id)
+    data = await state.get_data()
+
+    session = data["session"]
+    text = data["text"]
 
     with db() as c:
         groups = c.execute(
             "SELECT group_id FROM selected_groups WHERE user_id=? AND session=?",
-            (msg.from_user.id, d['session'])
+            (user_id, session)
         ).fetchall()
 
-    client = TelegramClient(f"{SESS_DIR}/{d['session']}", API_ID, API_HASH)
+    if not groups:
+        await call.answer("❌ Bu sessionda guruh tanlanmagan", show_alert=True)
+        return
+
+    client = TelegramClient(f"{SESS_DIR}/{session}", API_ID, API_HASH)
     await client.start()
-    running_clients[msg.from_user.id] = client
+    running_clients[user_id] = client
 
     async def loop():
         while True:
-            for g in groups:
+            for (gid,) in groups:
                 try:
-                    await client.send_message(g[0], d['text'])
+                    await client.send_message(gid, text)
                     await asyncio.sleep(random.randint(7, 15))
                 except FloodWaitError as e:
                     await asyncio.sleep(e.seconds)
             await asyncio.sleep(interval * 60)
 
-    running_tasks[msg.from_user.id] = asyncio.create_task(loop())
+    running_tasks[user_id] = asyncio.create_task(loop())
+
     await state.finish()
-    await msg.answer("▶️ Yuborish boshlandi")
-    await main_menu(msg)
+    await call.message.edit_text("▶️ Yuborish boshlandi")
+    await main_menu(call.message)
+    await call.answer()
+
 
 # ================= STOP =================
 @dp.message_handler(lambda m: m.text == "⛔ Stop")
