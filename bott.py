@@ -1,7 +1,6 @@
 # =====================================================
-# MULTI SESSION TELEGRAM BOT (ULTIMATE FULL)
+# MULTI SESSION TELEGRAM BOT (ULTIMATE FULL - FIXED)
 # Aiogram 2.25.1 + Telethon
-# ADMIN TASDIQLASH (2 ADMIN, 1 tasdiq yetarli)
 # =====================================================
 
 import os, asyncio, sqlite3, random
@@ -9,6 +8,7 @@ from aiogram import Bot, Dispatcher, executor, types
 from aiogram.contrib.fsm_storage.memory import MemoryStorage
 from aiogram.dispatcher import FSMContext
 from aiogram.dispatcher.filters.state import State, StatesGroup
+
 from telethon import TelegramClient
 from telethon.errors import FloodWaitError, SessionPasswordNeededError
 
@@ -16,18 +16,21 @@ from telethon.errors import FloodWaitError, SessionPasswordNeededError
 BOT_TOKEN = "8291345152:AAEeOP-2U9AfYvwCFnxrwDoFg7sjyWGwqGk"
 API_ID = 32460736
 API_HASH = "285e2a8556652e6f4ffdb83658081031"
+
+ADMINS = [6302873072, 6731395876]
+
 DB = "bot.db"
 SESS_DIR = "sessions"
-ADMINS = [6302873072, 6731395876]  # Ikkala admin ID
 os.makedirs(SESS_DIR, exist_ok=True)
 
 bot = Bot(BOT_TOKEN)
 dp = Dispatcher(bot, storage=MemoryStorage())
 
+# ================= GLOBALS =================
+approved_users = set()
+pending_requests = {}      # user_id -> [(admin_id, msg_id)]
 running_tasks = {}
 running_clients = {}
-pending_admins = {}  # {user_id: {"approved_by": set(), "status": "pending"}}
-approved_users = set()  # tasdiqlangan foydalanuvchilar
 
 # ================= DATABASE =================
 def db():
@@ -38,16 +41,11 @@ with db() as c:
         user_id INTEGER,
         session TEXT
     )""")
-    c.execute("""CREATE TABLE IF NOT EXISTS groups(
+    c.execute("""CREATE TABLE IF NOT EXISTS selected_groups(
         user_id INTEGER,
         session TEXT,
         group_id INTEGER,
         title TEXT
-    )""")
-    c.execute("""CREATE TABLE IF NOT EXISTS selected_groups(
-        user_id INTEGER,
-        session TEXT,
-        group_id INTEGER
     )""")
 
 # ================= STATES =================
@@ -68,216 +66,251 @@ async def main_menu(msg):
     kb.add("✉️ Habar yuborish", "⛔ Stop")
     await msg.answer("🏠 Asosiy menyu", reply_markup=kb)
 
-# ================= ADMIN TASDIQLASH =================
-async def request_admin(user_id):
-    pending_admins[user_id] = {"approved_by": set(), "status": "pending"}
+# =====================================================
+# ================= ADMIN TASDIQLASH ==================
+# =====================================================
+async def send_admin_request(user_id):
     kb = types.InlineKeyboardMarkup()
-    kb.add(types.InlineKeyboardButton("✅ Tasdiqlayman", callback_data=f"approve:{user_id}"))
-    kb.add(types.InlineKeyboardButton("❌ Rad etaman", callback_data=f"reject:{user_id}"))
+    kb.add(
+        types.InlineKeyboardButton("✅ Tasdiqlash", callback_data=f"approve:{user_id}"),
+        types.InlineKeyboardButton("❌ Rad etish", callback_data=f"reject:{user_id}")
+    )
+
+    pending_requests[user_id] = []
+
     for admin in ADMINS:
+        m = await bot.send_message(
+            admin,
+            f"👤 Foydalanuvchi `{user_id}` botga kirishni so‘rayapti",
+            parse_mode="Markdown",
+            reply_markup=kb
+        )
+        pending_requests[user_id].append((admin, m.message_id))
+
+@dp.callback_query_handler(lambda c: c.data.startswith(("approve:", "reject:")))
+async def admin_decision(call: types.CallbackQuery):
+    action, uid = call.data.split(":")
+    uid = int(uid)
+
+    if uid not in pending_requests:
+        await call.answer("⛔ Allaqachon hal qilingan")
+        return
+
+    text = "✅ Tasdiqlandi" if action == "approve" else "❌ Rad etildi"
+
+    # Inline tugmalarni HAMMA ADMINDAN o‘chirish
+    for admin_id, msg_id in pending_requests[uid]:
         try:
-            await bot.send_message(
-                admin,
-                f"Foydalanuvchi [{user_id}](tg://user?id={user_id}) botni ishlatmoqchi. Tasdiqlaysizmi?",
-                parse_mode="Markdown",
-                reply_markup=kb
+            await bot.edit_message_text(
+                text,
+                admin_id,
+                msg_id
             )
-        except Exception as e:
-            print(f"Adminga xabar yuborishda xato: {admin}, {e}")
+        except:
+            pass
 
-@dp.callback_query_handler(lambda c: c.data.startswith("approve:"))
-async def approve_user(call: types.CallbackQuery):
-    user_id = int(call.data.split(":")[1])
-    if user_id not in pending_admins:
-        await call.answer("❌ Foydalanuvchi kutish ro‘yxatda yo‘q")
-        return
-    pending_admins[user_id]["approved_by"].add(call.from_user.id)
-    await call.answer("✅ Siz tasdiqladingiz")
+    if action == "approve":
+        approved_users.add(uid)
+        await bot.send_message(uid, "✅ Siz tasdiqlandingiz. Botdan foydalanishingiz mumkin.")
+    else:
+        await bot.send_message(uid, "❌ Siz admin tomonidan rad etildingiz.")
 
-    # 1 admin tasdiqlasa darhol foydalanuvchi kiradi
-    if pending_admins[user_id]["status"] == "pending":
-        approved_users.add(user_id)
-        pending_admins[user_id]["status"] = "approved"
-        try:
-            await bot.send_message(user_id, "✅ Siz tasdiqlandingiz! Botdan foydalanishingiz mumkin.")
-        except Exception as e:
-            print(f"Foydalanuvchiga xabar yuborishda xato: {user_id}, {e}")
+    del pending_requests[uid]
+    await call.answer("✔️ Bajarildi")
 
-        # Ikkinchi admin uchun ham avtomatik "tasdiqlandi"
-        for admin in ADMINS:
-            pending_admins[user_id]["approved_by"].add(admin)
-
-@dp.callback_query_handler(lambda c: c.data.startswith("reject:"))
-async def reject_user(call: types.CallbackQuery):
-    user_id = int(call.data.split(":")[1])
-    if user_id not in pending_admins:
-        await call.answer("❌ Foydalanuvchi kutish ro‘yxatda yo‘q")
-        return
-    pending_admins[user_id]["status"] = "rejected"
-    del pending_admins[user_id]
-    await call.answer("❌ Siz rad etdiniz. Foydalanuvchi rad qilindi")
-    try:
-        await bot.send_message(user_id, "❌ Sizni admin rad qildi. Botga kirish mumkin emas.")
-    except Exception as e:
-        print(f"Foydalanuvchiga xabar yuborishda xato: {user_id}, {e}")
-
-# ================= RESET / START =================
-@dp.message_handler(commands=['start'])
-async def start(msg: types.Message):
-    user_id = msg.from_user.id
-    if user_id in approved_users or user_id in ADMINS:
+# ================= START =================
+@dp.message_handler(commands=["start"])
+async def start(msg):
+    uid = msg.from_user.id
+    if uid in ADMINS or uid in approved_users:
         await main_menu(msg)
     else:
-        await request_admin(user_id)
-        await msg.answer("⏳ Adminlar sizni tasdiqlashini kuting...")
+        await send_admin_request(uid)
+        await msg.answer("⏳ Adminlar tasdiqlashini kuting...")
 
-# =================================================
-# ================= 📱 RAQAMLAR ==================
-# =================================================
+# =====================================================
+# ================= 📱 RAQAMLAR =======================
+# =====================================================
 @dp.message_handler(lambda m: m.text == "📱 Raqamlar")
 async def numbers_menu(msg):
     kb = types.ReplyKeyboardMarkup(resize_keyboard=True)
-    kb.add("➕ Raqam qo‘shish")
+    kb.add("➕ Raqam qo‘shish", "🗑 Raqam o‘chirish")
     kb.add("⬅️ Orqaga")
     await msg.answer("📱 Raqamlar bo‘limi", reply_markup=kb)
 
 @dp.message_handler(lambda m: m.text == "➕ Raqam qo‘shish")
-async def ask_phone(msg):
-    kb = types.ReplyKeyboardMarkup(resize_keyboard=True)
-    kb.add("❌ Bekor qilish")
-    await msg.answer("📞 Telefon raqam kiriting (+998...)", reply_markup=kb)
+async def add_number(msg):
+    await msg.answer("📞 Telefon raqam kiriting (+998...)")
     await AddNum.phone.set()
 
-@dp.message_handler(lambda m: m.text == "⬅️ Orqaga", state="*")
-async def back_menu(msg, state: FSMContext):
-    await state.finish()
-    await main_menu(msg)
-
-@dp.message_handler(lambda m: m.text == "❌ Bekor qilish", state="*")
-async def cancel_any(msg, state: FSMContext):
-    await state.finish()
-    await msg.answer("❌ Bekor qilindi")
-    await main_menu(msg)
-
 @dp.message_handler(state=AddNum.phone)
-async def get_phone(msg, state: FSMContext):
+async def get_phone(msg, state):
     phone = msg.text.strip()
     session = phone.replace("+", "")
     client = TelegramClient(f"{SESS_DIR}/{session}", API_ID, API_HASH)
     await client.connect()
     try:
         sent = await client.send_code_request(phone)
-        await state.update_data(phone=phone, session=session, code_hash=sent.phone_code_hash)
-        await msg.answer("📨 SMS kodni kiriting:")
+        await state.update_data(phone=phone, session=session, hash=sent.phone_code_hash)
         await AddNum.code.set()
-    except Exception:
-        await msg.answer("❌ Ulanib bo‘lmadi yoki raqam xato")
+        await msg.answer("📨 SMS kodni kiriting:")
+    except:
+        await msg.answer("❌ Raqam xato yoki bloklangan")
         await state.finish()
-        await main_menu(msg)
     finally:
         await client.disconnect()
 
 @dp.message_handler(state=AddNum.code)
-async def get_code(msg, state: FSMContext):
+async def get_code(msg, state):
     d = await state.get_data()
     client = TelegramClient(f"{SESS_DIR}/{d['session']}", API_ID, API_HASH)
     await client.connect()
     try:
-        await client.sign_in(phone=d['phone'], code=msg.text, phone_code_hash=d['code_hash'])
-        with db() as c:
-            c.execute("INSERT INTO numbers(user_id,session) VALUES (?,?)",(msg.from_user.id, d['session']))
-        await msg.answer("✅ Raqam muvaffaqiyatli ulandi")
+        await client.sign_in(d['phone'], msg.text, phone_code_hash=d['hash'])
     except SessionPasswordNeededError:
-        await msg.answer("🔐 2 bosqichli parolni kiriting:")
         await AddNum.password.set()
+        await msg.answer("🔐 2-bosqichli parolni kiriting:")
         return
-    except Exception:
-        await msg.answer("❌ Kod xato yoki akkaunt bloklangan")
+    except:
+        await msg.answer("❌ Kod xato")
         await state.finish()
-        await main_menu(msg)
-        return
-    finally:
         await client.disconnect()
+        return
+
+    with db() as c:
+        c.execute("INSERT INTO numbers VALUES (?,?)", (msg.from_user.id, d['session']))
+
+    await client.disconnect()
+    await msg.answer("✅ Akkaunt ulandi")
     await state.finish()
     await main_menu(msg)
 
 @dp.message_handler(state=AddNum.password)
-async def get_password(msg, state: FSMContext):
+async def get_password(msg, state):
     d = await state.get_data()
     client = TelegramClient(f"{SESS_DIR}/{d['session']}", API_ID, API_HASH)
     await client.connect()
     try:
         await client.sign_in(password=msg.text)
         with db() as c:
-            c.execute("INSERT INTO numbers(user_id,session) VALUES (?,?)",(msg.from_user.id, d['session']))
-        await msg.answer("✅ Parol to‘g‘ri, akkaunt ulandi")
-    except Exception:
-        await msg.answer("❌ Parol xato yoki akkaunt bloklangan")
+            c.execute("INSERT INTO numbers VALUES (?,?)", (msg.from_user.id, d['session']))
+        await msg.answer("✅ Akkaunt ulandi")
+    except:
+        await msg.answer("❌ Parol noto‘g‘ri, qayta urinib ko‘ring")
+        return
     finally:
         await client.disconnect()
+
     await state.finish()
     await main_menu(msg)
 
-# =================================================
-# ================= 👥 GURUHLAR =================
-# =================================================
-@dp.message_handler(lambda m: m.text == "👥 Guruhlar")
-async def choose_session(msg):
+# ================= SESSION O‘CHIRISH =================
+@dp.message_handler(lambda m: m.text == "🗑 Raqam o‘chirish")
+async def delete_session(msg):
     with db() as c:
-        rows = c.execute("SELECT session FROM numbers WHERE user_id=?",(msg.from_user.id,)).fetchall()
+        rows = c.execute("SELECT session FROM numbers WHERE user_id=?", (msg.from_user.id,)).fetchall()
+
     kb = types.InlineKeyboardMarkup()
     for s in rows:
-        kb.add(types.InlineKeyboardButton(text=s[0], callback_data=f"gs:{s[0]}"))
-    kb.add(types.InlineKeyboardButton(text="⬅️ Orqaga", callback_data="back_main"))
+        kb.add(types.InlineKeyboardButton(f"❌ {s[0]}", callback_data=f"delsess:{s[0]}"))
+    kb.add(types.InlineKeyboardButton("⬅️ Orqaga", callback_data="back"))
+
+    await msg.answer("🗑 O‘chiriladigan sessionni tanlang", reply_markup=kb)
+
+@dp.callback_query_handler(lambda c: c.data.startswith("delsess:"))
+async def confirm_delete(call: types.CallbackQuery):
+    sess = call.data.split(":")[1]
+
+    if call.from_user.id in running_tasks:
+        running_tasks[call.from_user.id].cancel()
+
+    if call.from_user.id in running_clients:
+        await running_clients[call.from_user.id].disconnect()
+
+    with db() as c:
+        c.execute("DELETE FROM numbers WHERE session=?", (sess,))
+        c.execute("DELETE FROM selected_groups WHERE session=?", (sess,))
+
+    try:
+        os.remove(f"{SESS_DIR}/{sess}.session")
+    except:
+        pass
+
+    await call.message.edit_text("✅ Session o‘chirildi")
+
+# =====================================================
+# ================= 👥 GURUHLAR =======================
+# =====================================================
+@dp.message_handler(lambda m: m.text == "👥 Guruhlar")
+async def groups_menu(msg):
+    with db() as c:
+        sessions = c.execute("SELECT session FROM numbers WHERE user_id=?", (msg.from_user.id,)).fetchall()
+
+    kb = types.InlineKeyboardMarkup()
+    for s in sessions:
+        kb.add(types.InlineKeyboardButton(s[0], callback_data=f"loadgrp:{s[0]}"))
+    kb.add(types.InlineKeyboardButton("⬅️ Orqaga", callback_data="back"))
+
     await msg.answer("📂 Session tanlang", reply_markup=kb)
 
-@dp.callback_query_handler(lambda c: c.data == "back_main")
-async def back_main(call: types.CallbackQuery):
-    await call.message.delete()
-    await main_menu(call.message)
-
-@dp.callback_query_handler(lambda c: c.data.startswith("gs:"))
+@dp.callback_query_handler(lambda c: c.data.startswith("loadgrp:"))
 async def load_groups(call: types.CallbackQuery):
     sess = call.data.split(":")[1]
     client = TelegramClient(f"{SESS_DIR}/{sess}", API_ID, API_HASH)
     await client.start()
-    with db() as c:
-        c.execute("DELETE FROM groups WHERE user_id=? AND session=?",(call.from_user.id, sess))
-        dialogs = await client.get_dialogs()
-        kb = types.InlineKeyboardMarkup()
-        for d in dialogs:
-            if d.is_group or d.is_channel:
-                c.execute("INSERT INTO groups(user_id,session,group_id,title) VALUES (?,?,?,?)",
-                          (call.from_user.id, sess, d.id, d.name))
-                kb.add(types.InlineKeyboardButton(text=d.name[:30], callback_data=f"gadd:{sess}:{d.id}"))
-        kb.add(types.InlineKeyboardButton(text="⬅️ Orqaga", callback_data="back_main"))
-    await client.disconnect()
-    await call.message.edit_text("☑️ Guruh tanlang", reply_markup=kb)
 
-@dp.callback_query_handler(lambda c: c.data.startswith("gadd:"))
-async def add_group(call: types.CallbackQuery):
-    _, sess, gid = call.data.split(":")
+    dialogs = await client.get_dialogs(limit=None)
+
     with db() as c:
-        c.execute("INSERT INTO selected_groups(user_id,session,group_id) VALUES (?,?,?)",
-                  (call.from_user.id, sess, int(gid)))
+        added = {g[0] for g in c.execute(
+            "SELECT group_id FROM selected_groups WHERE user_id=? AND session=?",
+            (call.from_user.id, sess)
+        )}
+
+    kb = types.InlineKeyboardMarkup(row_width=1)
+    for d in dialogs:
+        if d.is_group or d.is_channel:
+            mark = "✅ " if d.id in added else ""
+            kb.add(types.InlineKeyboardButton(
+                f"{mark}{d.name[:30]}",
+                callback_data=f"addgrp:{sess}:{d.id}:{d.name[:30]}"
+            ))
+
+    kb.add(types.InlineKeyboardButton("⬅️ Orqaga", callback_data="back"))
+    await call.message.edit_text("👥 Guruhlar ro‘yxati", reply_markup=kb)
+    await client.disconnect()
+
+@dp.callback_query_handler(lambda c: c.data.startswith("addgrp:"))
+async def add_group(call: types.CallbackQuery):
+    _, sess, gid, title = call.data.split(":", 3)
+    with db() as c:
+        c.execute(
+            "INSERT OR IGNORE INTO selected_groups VALUES (?,?,?,?)",
+            (call.from_user.id, sess, int(gid), title)
+        )
     await call.answer("✅ Guruh qo‘shildi")
 
-# =================================================
+# =====================================================
 # ================= ✉️ HABAR YUBORISH =================
-# =================================================
+# =====================================================
 @dp.message_handler(lambda m: m.text == "✉️ Habar yuborish")
-async def send_choose(msg):
+async def send_start(msg):
     with db() as c:
-        rows = c.execute("SELECT DISTINCT session FROM selected_groups WHERE user_id=?",(msg.from_user.id,)).fetchall()
+        sessions = c.execute(
+            "SELECT DISTINCT session FROM selected_groups WHERE user_id=?",
+            (msg.from_user.id,)
+        ).fetchall()
+
     kb = types.ReplyKeyboardMarkup(resize_keyboard=True)
-    for r in rows:
-        kb.add(r[0])
+    for s in sessions:
+        kb.add(s[0])
     kb.add("⬅️ Orqaga")
+
     await msg.answer("📂 Session tanlang", reply_markup=kb)
     await SendFlow.session.set()
 
 @dp.message_handler(state=SendFlow.session)
-async def send_text(msg, state: FSMContext):
+async def get_text(msg, state):
     if msg.text == "⬅️ Orqaga":
         await state.finish()
         await main_menu(msg)
@@ -287,20 +320,22 @@ async def send_text(msg, state: FSMContext):
     await SendFlow.text.set()
 
 @dp.message_handler(state=SendFlow.text)
-async def send_interval(msg, state: FSMContext):
+async def get_interval(msg, state):
     await state.update_data(text=msg.text)
-    kb = types.ReplyKeyboardMarkup(resize_keyboard=True)
-    kb.add("5","10","15")
-    await msg.answer("⏱ Interval (min)", reply_markup=kb)
+    await msg.answer("⏱ Interval (min): 5 / 10 / 15")
     await SendFlow.interval.set()
 
 @dp.message_handler(state=SendFlow.interval)
-async def start_send(msg, state: FSMContext):
+async def start_sending(msg, state):
     d = await state.get_data()
-    mins = int(msg.text)
+    interval = int(msg.text)
+
     with db() as c:
-        groups = c.execute("SELECT group_id FROM selected_groups WHERE user_id=? AND session=?",
-                           (msg.from_user.id, d['session'])).fetchall()
+        groups = c.execute(
+            "SELECT group_id FROM selected_groups WHERE user_id=? AND session=?",
+            (msg.from_user.id, d['session'])
+        ).fetchall()
+
     client = TelegramClient(f"{SESS_DIR}/{d['session']}", API_ID, API_HASH)
     await client.start()
     running_clients[msg.from_user.id] = client
@@ -310,20 +345,17 @@ async def start_send(msg, state: FSMContext):
             for g in groups:
                 try:
                     await client.send_message(g[0], d['text'])
-                    await asyncio.sleep(random.randint(5,10))
+                    await asyncio.sleep(random.randint(7, 15))
                 except FloodWaitError as e:
                     await asyncio.sleep(e.seconds)
-            await asyncio.sleep(mins*60)
+            await asyncio.sleep(interval * 60)
 
-    task = asyncio.create_task(loop())
-    running_tasks[msg.from_user.id] = task
+    running_tasks[msg.from_user.id] = asyncio.create_task(loop())
     await state.finish()
     await msg.answer("▶️ Yuborish boshlandi")
     await main_menu(msg)
 
-# =================================================
-# ================= ⛔ STOP =======================
-# =================================================
+# ================= STOP =================
 @dp.message_handler(lambda m: m.text == "⛔ Stop")
 async def stop_all(msg):
     task = running_tasks.pop(msg.from_user.id, None)
@@ -332,7 +364,7 @@ async def stop_all(msg):
         task.cancel()
     if client:
         await client.disconnect()
-    await msg.answer("⛔ Yuborish to‘xtatildi")
+    await msg.answer("⛔ To‘xtatildi")
     await main_menu(msg)
 
 # ================= RUN =================
