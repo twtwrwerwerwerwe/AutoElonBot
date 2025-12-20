@@ -151,94 +151,131 @@ async def start(msg):
         await send_admin_request(uid)
         await msg.answer("⏳ Adminlar tasdiqlashini kuting...")
 
-# =================📱 RAQAMLAR=================
+# =================📱 RAQAMLAR BO'LIMI (TO'G'RILANGAN) =================
+
 @dp.message_handler(lambda m: m.text == "📱 Raqamlar")
-async def numbers_menu(msg):
+async def numbers_menu(msg: types.Message):
     kb = types.ReplyKeyboardMarkup(resize_keyboard=True)
     kb.add("➕ Raqam qo‘shish", "🗑 Raqam o‘chirish")
-    kb.add("⬅️ Orqaga")
+    kb.add("🏠 Asosiy menyu") # "Orqaga" o'rniga aniqroq nom
     await msg.answer("📱 Raqamlar bo‘limi", reply_markup=kb)
 
+# Asosiy menyuga qaytish tugmasi uchun
+@dp.message_handler(lambda m: m.text == "🏠 Asosiy menyu")
+async def back_to_main(msg: types.Message):
+    await main_menu(msg)
+
 @dp.message_handler(lambda m: m.text == "➕ Raqam qo‘shish")
-async def add_number(msg):
+async def add_number(msg: types.Message):
     kb = types.ReplyKeyboardMarkup(resize_keyboard=True)
     kb.add("⬅️ Orqaga")
     await msg.answer("📞 Telefon raqam kiriting (+998...)", reply_markup=kb)
     await AddNum.phone.set()
 
 @dp.message_handler(state=AddNum.phone)
-async def get_phone(msg, state):
+async def get_phone(msg: types.Message, state: FSMContext):
     if msg.text == "⬅️ Orqaga":
         await state.finish()
         await numbers_menu(msg)
         return
+    
     phone = msg.text.strip()
-    session = phone.replace("+", "")
-    client = TelegramClient(f"{SESS_DIR}/{session}", API_ID, API_HASH)
+    session_name = phone.replace("+", "")
+    
+    # Yangi Samsung A16 modeli bilan client yaratish
+    client = TelegramClient(
+        f"{SESS_DIR}/{session_name}", 
+        API_ID, 
+        API_HASH,
+        device_model="Samsung A16",
+        system_version="15.0",
+        app_version="10.3.0"
+    )
+    
     await client.connect()
     try:
         sent = await client.send_code_request(phone)
-        await state.update_data(phone=phone, session=session, hash=sent.phone_code_hash)
+        await state.update_data(phone=phone, session=session_name, hash=sent.phone_code_hash)
         await AddNum.code.set()
+        
         kb = types.ReplyKeyboardMarkup(resize_keyboard=True)
         kb.add("⬅️ Orqaga")
-        await msg.answer("📨 SMS kodni kiriting:", reply_markup=kb)
+        await msg.answer("📨 SMS kodni yoki Telegramga kelgan kodni kiriting:", reply_markup=kb)
     except Exception as e:
-        await msg.answer(f"❌ Raqam xato yoki bloklangan ({e})")
+        await msg.answer(f"❌ Xatolik yuz berdi: {e}")
         await state.finish()
     finally:
         await client.disconnect()
 
 @dp.message_handler(state=AddNum.code)
-async def get_code(msg, state):
+async def get_code(msg: types.Message, state: FSMContext):
     if msg.text == "⬅️ Orqaga":
         await state.finish()
         await numbers_menu(msg)
         return
+    
     d = await state.get_data()
-    client = TelegramClient(f"{SESS_DIR}/{d['session']}", API_ID, API_HASH)
+    # d['session'] dan foydalanamiz, chunki bu funksiyada 'session' o'zgaruvchisi yo'q
+    client = TelegramClient(
+        f"{SESS_DIR}/{d['session']}", 
+        API_ID, 
+        API_HASH,
+        device_model="Samsung A16",
+        system_version="15.0",
+        app_version="10.3.0"
+    )
+    
     await client.connect()
     try:
-        await client.sign_in(d['phone'], msg.text.strip(), phone_code_hash=d['hash'])
+        code = msg.text.strip().replace(" ", "")
+        await client.sign_in(d['phone'], code, phone_code_hash=d['hash'])
+        
+        with db() as c:
+            c.execute("INSERT INTO numbers (user_id, session) VALUES (?,?)", (msg.from_user.id, d['session']))
+        
+        await msg.answer("✅ Akkaunt muvaffaqiyatli ulandi!")
+        await state.finish()
+        await numbers_menu(msg)
+        
     except SessionPasswordNeededError:
         await AddNum.password.set()
         kb = types.ReplyKeyboardMarkup(resize_keyboard=True)
         kb.add("⬅️ Orqaga")
-        await msg.answer("🔐 2-bosqichli parolni kiriting:", reply_markup=kb)
-        return
+        await msg.answer("🔐 Akkauntda 2-bosqichli parol bor. Parolni kiriting:", reply_markup=kb)
     except Exception as e:
-        await msg.answer(f"❌ Kod xato ({e})")
-        await state.finish()
+        await msg.answer(f"❌ Kod xato yoki muddati o'tgan: {e}")
+    finally:
         await client.disconnect()
-        return
-    with db() as c:
-        c.execute("INSERT INTO numbers VALUES (?,?)", (msg.from_user.id, d['session']))
-    await client.disconnect()
-    await msg.answer("✅ Akkaunt ulandi")
-    await state.finish()
-    await numbers_menu(msg)
 
 @dp.message_handler(state=AddNum.password)
-async def get_password(msg, state):
+async def get_password(msg: types.Message, state: FSMContext):
     if msg.text == "⬅️ Orqaga":
         await state.finish()
         await numbers_menu(msg)
         return
+    
     d = await state.get_data()
-    client = TelegramClient(f"{SESS_DIR}/{d['session']}", API_ID, API_HASH)
+    client = TelegramClient(
+        f"{SESS_DIR}/{d['session']}", 
+        API_ID, 
+        API_HASH,
+        device_model="Samsung A16",
+        system_version="15.0",
+        app_version="10.3.0"
+    )
+    
     await client.connect()
     try:
         await client.sign_in(password=msg.text.strip())
         with db() as c:
-            c.execute("INSERT INTO numbers VALUES (?,?)", (msg.from_user.id, d['session']))
-        await msg.answer("✅ Akkaunt ulandi")
-    except:
-        await msg.answer("❌ Parol noto‘g‘ri, qayta urinib ko‘ring")
-        return
+            c.execute("INSERT INTO numbers (user_id, session) VALUES (?,?)", (msg.from_user.id, d['session']))
+        await msg.answer("✅ Akkaunt (parol orqali) ulandi!")
+        await state.finish()
+        await numbers_menu(msg)
+    except Exception as e:
+        await msg.answer(f"❌ Parol noto‘g‘ri yoki xatolik: {e}")
     finally:
         await client.disconnect()
-    await state.finish()
-    await numbers_menu(msg)
 
 # ================= SESSION O‘CHIRISH =================
 @dp.message_handler(lambda m: m.text == "🗑 Raqam o‘chirish")
