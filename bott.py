@@ -13,15 +13,15 @@ from telethon import TelegramClient
 from telethon.errors import FloodWaitError, SessionPasswordNeededError, UserIsBlockedError
 
 # ================= CONFIG =================
-BOT_TOKEN = "8396193031:AAGzjseC_1qASNy6bWNkI4BTQnRXaiGV6eg"
-API_ID = 32460736
+BOT_TOKEN = "ca07a6a98a97f85f371d2b3d179ecd06"
+API_ID = 39100604
 API_HASH = "285e2a8556652e6f4ffdb83658081031"
 
 ADMINS = [6302873072, 6731395876]  # adminlar IDlari
 
 DB = "bot.db"
 SESS_DIR = "sessions"
-os.makedirs(SESS_DIR, exist_ok=True)
+os.makedirs(SESS_DIR, exist_ok=True)    
 
 bot = Bot(BOT_TOKEN)
 dp = Dispatcher(bot, storage=MemoryStorage())
