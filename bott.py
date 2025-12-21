@@ -238,8 +238,10 @@ async def get_code(msg: types.Message, state: FSMContext):
         return
 
     data = await state.get_data()
+
     phone = data["phone"]
     session = data["session"]
+    phone_code_hash = data["phone_code_hash"]
 
     client = TelegramClient(
         f"{SESS_DIR}/{session}",
@@ -251,11 +253,16 @@ async def get_code(msg: types.Message, state: FSMContext):
     )
 
     await client.connect()
+
     try:
         code = msg.text.replace(" ", "").strip()
 
-        # ✅ TO‘G‘RI SIGN IN
-        await client.sign_in(phone=phone, code=code)
+        # 🔥 MAJBURIY phone_code_hash bilan
+        await client.sign_in(
+            phone=phone,
+            code=code,
+            phone_code_hash=phone_code_hash
+        )
 
         with db() as c:
             c.execute(
@@ -269,18 +276,14 @@ async def get_code(msg: types.Message, state: FSMContext):
 
     except SessionPasswordNeededError:
         await AddNum.password.set()
-        kb = types.ReplyKeyboardMarkup(resize_keyboard=True)
-        kb.add("⬅️ Orqaga")
-        await msg.answer(
-            "🔐 Akkauntda 2 bosqichli parol bor.\nParolni kiriting:",
-            reply_markup=kb
-        )
+        await msg.answer("🔐 2 bosqichli parolni kiriting:")
 
     except Exception as e:
         await msg.answer(f"❌ Kod xato yoki eskirgan:\n{e}")
 
     finally:
         await client.disconnect()
+
 
 
 @dp.message_handler(state=AddNum.password)
