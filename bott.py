@@ -152,24 +152,26 @@ async def start(msg):
         await msg.answer("⏳ Adminlar tasdiqlashini kuting...")
 
 
-# =================📱 RAQAMLAR BO‘LIMI =================
-login_data = {}  # user_id -> phone, session, phone_code_hash
+# =====================================================
+# ================= 📱 RAQAMLAR =======================
+# =====================================================
 
 @dp.message_handler(lambda m: m.text == "📱 Raqamlar")
-async def numbers_menu(msg: types.Message):
+async def numbers_menu(msg):
     kb = types.ReplyKeyboardMarkup(resize_keyboard=True)
     kb.add("➕ Raqam qo‘shish", "🗑 Raqam o‘chirish")
-    kb.add("🏠 Asosiy menyu")
+    kb.add("⬅️ Orqaga")
     await msg.answer("📱 Raqamlar bo‘limi", reply_markup=kb)
 
 
 @dp.message_handler(lambda m: m.text == "➕ Raqam qo‘shish")
-async def add_number(msg: types.Message):
+async def add_number(msg):
     kb = types.ReplyKeyboardMarkup(resize_keyboard=True)
     kb.add(types.KeyboardButton("📱 Raqamni ulashish", request_contact=True))
     kb.add("⬅️ Orqaga")
+
     await msg.answer(
-        "📞 Telefon raqamingizni yuboring\n(Masalan: +998901234567)",
+        "📞 Telefon raqam kiriting yoki tugma orqali yuboring\n(+998...)",
         reply_markup=kb
     )
     await AddNum.phone.set()
@@ -177,28 +179,41 @@ async def add_number(msg: types.Message):
 
 # ================= PHONE =================
 @dp.message_handler(state=AddNum.phone, content_types=["text", "contact"])
-async def get_phone(msg: types.Message, state: FSMContext):
-    phone = msg.contact.phone_number if msg.contact else msg.text.strip()
-    if not phone.startswith("+"):
-        phone = "+" + phone
+async def get_phone(msg, state):
+    if msg.text == "⬅️ Orqaga":
+        await state.finish()
+        await numbers_menu(msg)
+        return
+
+    if msg.contact:
+        phone = msg.contact.phone_number
+        if not phone.startswith("+"):
+            phone = "+" + phone
+    else:
+        phone = msg.text.strip()
 
     session = phone.replace("+", "")
     client = TelegramClient(f"{SESS_DIR}/{session}", API_ID, API_HASH)
+    await client.connect()
 
     try:
-        await client.connect()
         sent = await client.send_code_request(phone)
 
-        login_data[msg.from_user.id] = {
-            "phone": phone,
-            "session": session,
-            "phone_code_hash": sent.phone_code_hash
-        }
+        await state.update_data(
+            phone=phone,
+            session=session,
+            hash=sent.phone_code_hash
+        )
 
         kb = types.ReplyKeyboardMarkup(resize_keyboard=True)
         kb.add("🔁 Kodni qayta yuborish", "⬅️ Orqaga")
+
         await AddNum.code.set()
-        await msg.answer("📨 Kod yuborildi. Kiriting:", reply_markup=kb)
+        await msg.answer("📨 SMS kodni kiriting:", reply_markup=kb)
+
+    except Exception:
+        await msg.answer("❌ Raqam xato yoki bloklangan")
+        await state.finish()
 
     finally:
         await client.disconnect()
@@ -206,82 +221,87 @@ async def get_phone(msg: types.Message, state: FSMContext):
 
 # ================= CODE =================
 @dp.message_handler(state=AddNum.code)
-async def get_code(msg: types.Message, state: FSMContext):
-    data = login_data.get(msg.from_user.id)
-    if not data:
-        await msg.answer("❌ Sessiya eskirgan. Qayta boshlang.")
+async def get_code(msg, state):
+    if msg.text == "⬅️ Orqaga":
         await state.finish()
+        await numbers_menu(msg)
         return
 
-    # 🔁 resend
+    d = await state.get_data()
+
+    # 🔁 Kodni qayta yuborish
     if msg.text == "🔁 Kodni qayta yuborish":
-        client = TelegramClient(f"{SESS_DIR}/{data['session']}", API_ID, API_HASH)
+        client = TelegramClient(f"{SESS_DIR}/{d['session']}", API_ID, API_HASH)
+        await client.connect()
         try:
-            await client.connect()
-            sent = await client.send_code_request(data["phone"])
-            data["phone_code_hash"] = sent.phone_code_hash
-            await msg.answer("🔁 Kod qayta yuborildi.")
+            sent = await client.send_code_request(d['phone'])
+            await state.update_data(hash=sent.phone_code_hash)
+            await msg.answer("🔁 Kod qayta yuborildi. Yangi kodni kiriting:")
         finally:
             await client.disconnect()
         return
 
-    client = TelegramClient(f"{SESS_DIR}/{data['session']}", API_ID, API_HASH)
+    client = TelegramClient(f"{SESS_DIR}/{d['session']}", API_ID, API_HASH)
+    await client.connect()
 
     try:
-        await client.connect()
         await client.sign_in(
-            phone=data["phone"],
+            phone=d['phone'],
             code=msg.text.strip(),
-            phone_code_hash=data["phone_code_hash"]
+            phone_code_hash=d['hash']
         )
-
-        with db() as c:
-            c.execute(
-                "INSERT INTO numbers (user_id, session) VALUES (?, ?)",
-                (msg.from_user.id, data["session"])
-            )
-
-        await msg.answer("✅ Akkaunt ulandi!")
-        await state.finish()
-        await numbers_menu(msg)
 
     except SessionPasswordNeededError:
         await AddNum.password.set()
-        await msg.answer("🔐 2FA parolni kiriting:")
+        await msg.answer("🔐 2-bosqichli parolni kiriting:")
+        await client.disconnect()
+        return
 
     except Exception:
-        await msg.answer(
-            "❌ Telegram xavfsizlik sabab loginni rad etdi.\n"
-            "⏳ 10–15 daqiqa kutib qayta urinib ko‘ring."
+        await msg.answer("❌ Kod xato yoki eskirgan")
+        await state.finish()
+        await client.disconnect()
+        return
+
+    with db() as c:
+        c.execute(
+            "INSERT INTO numbers VALUES (?, ?)",
+            (msg.from_user.id, d['session'])
         )
 
-    finally:
-        await client.disconnect()
+    await client.disconnect()
+    await msg.answer("✅ Akkaunt ulandi")
+    await state.finish()
+    await main_menu(msg)
 
 
 # ================= PASSWORD =================
 @dp.message_handler(state=AddNum.password)
-async def get_password(msg: types.Message, state: FSMContext):
-    data = login_data.get(msg.from_user.id)
-    client = TelegramClient(f"{SESS_DIR}/{data['session']}", API_ID, API_HASH)
+async def get_password(msg, state):
+    d = await state.get_data()
+
+    client = TelegramClient(f"{SESS_DIR}/{d['session']}", API_ID, API_HASH)
+    await client.connect()
 
     try:
-        await client.connect()
         await client.sign_in(password=msg.text.strip())
 
         with db() as c:
             c.execute(
-                "INSERT INTO numbers (user_id, session) VALUES (?, ?)",
-                (msg.from_user.id, data["session"])
+                "INSERT INTO numbers VALUES (?, ?)",
+                (msg.from_user.id, d['session'])
             )
 
-        await msg.answer("✅ 2FA orqali ulandi!")
-        await state.finish()
-        await numbers_menu(msg)
+        await msg.answer("✅ Akkaunt ulandi")
+
+    except Exception:
+        await msg.answer("❌ Parol noto‘g‘ri, qayta urinib ko‘ring")
+        return
 
     finally:
         await client.disconnect()
-        login_data.pop(msg.from_user.id, None)
+        await state.finish()
+        await main_menu(msg)
 
 
 # ================= SESSION O‘CHIRISH =================
