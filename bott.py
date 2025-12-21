@@ -151,7 +151,7 @@ async def start(msg):
         await send_admin_request(uid)
         await msg.answer("⏳ Adminlar tasdiqlashini kuting...")
 
-# =================📱 RAQAMLAR BO'LIMI (YANGILANGAN) =================
+# =================📱 RAQAMLAR BO'LIMI (FIXED) =================
 
 @dp.message_handler(lambda m: m.text == "📱 Raqamlar")
 async def numbers_menu(msg: types.Message):
@@ -160,30 +160,32 @@ async def numbers_menu(msg: types.Message):
     kb.add("🏠 Asosiy menyu")
     await msg.answer("📱 Raqamlar bo‘limi", reply_markup=kb)
 
+
 @dp.message_handler(lambda m: m.text == "🏠 Asosiy menyu")
 async def back_to_main(msg: types.Message):
     await main_menu(msg)
 
+
 @dp.message_handler(lambda m: m.text == "➕ Raqam qo‘shish")
 async def add_number(msg: types.Message):
-    # Ikki xil usul: Tugma va Qo'lda yozish
     kb = types.ReplyKeyboardMarkup(resize_keyboard=True)
     kb.add(types.KeyboardButton("📱 Raqamni ulashish", request_contact=True))
     kb.add("⬅️ Orqaga")
     await msg.answer(
-        "📞 Telefon raqamingizni pastdagi tugma orqali yuboring yoki qo'lda yozing (Format: +998901234567):", 
+        "📞 Telefon raqamingizni yuboring yoki qo‘lda yozing\n"
+        "(Masalan: +998901234567)",
         reply_markup=kb
     )
     await AddNum.phone.set()
 
-@dp.message_handler(state=AddNum.phone, content_types=['text', 'contact'])
+
+@dp.message_handler(state=AddNum.phone, content_types=["text", "contact"])
 async def get_phone(msg: types.Message, state: FSMContext):
     if msg.text == "⬅️ Orqaga":
         await state.finish()
         await numbers_menu(msg)
         return
 
-    # Raqamni kontakt tugmasidan yoki matndan olish
     if msg.contact:
         phone = msg.contact.phone_number
         if not phone.startswith("+"):
@@ -191,38 +193,42 @@ async def get_phone(msg: types.Message, state: FSMContext):
     else:
         phone = msg.text.strip()
         if not phone.startswith("+"):
-            await msg.answer("❌ Raqamni + belgi bilan boshlab yozing!")
+            await msg.answer("❌ Raqam + bilan boshlanishi kerak")
             return
 
-    session_name = phone.replace("+", "")
-    
-    # Rasmiy Telegram Desktop API ma'lumotlari kod tezroq kelishi uchun
-    # API_ID va API_HASH ni config qismida o'zgartirgan bo'lsangiz, shunday qoladi
-    # Agar 1 kundan keyin kelayotgan bo'lsa, bu yerda 2040 va b18441a1ff607e10a989891a562527d9 ishlatib ko'ring
+    session = phone.replace("+", "")
+
     client = TelegramClient(
-        f"{SESS_DIR}/{session_name}", 
-        API_ID, 
+        f"{SESS_DIR}/{session}",
+        API_ID,
         API_HASH,
         device_model="Desktop",
         system_version="Windows 10",
         app_version="4.12.2"
     )
-    
+
     await client.connect()
     try:
-        sent = await client.send_code_request(phone)
-        await state.update_data(phone=phone, session=session_name, hash=sent.phone_code_hash)
+        await client.send_code_request(phone)
+
+        await state.update_data(phone=phone, session=session)
         await AddNum.code.set()
-        
-        # Tugmalarni yashirish (Faqat orqaga qoladi)
+
         kb = types.ReplyKeyboardMarkup(resize_keyboard=True)
         kb.add("⬅️ Orqaga")
-        await msg.answer(f"📨 Kod {phone} raqamiga yuborildi. Telegram chatini tekshiring:", reply_markup=kb)
+        await msg.answer(
+            f"📨 Kod {phone} raqamiga yuborildi.\n"
+            f"Telegramdan kelgan kodni kiriting:",
+            reply_markup=kb
+        )
+
     except Exception as e:
-        await msg.answer(f"❌ Xatolik yuz berdi: {e}")
+        await msg.answer(f"❌ Kod yuborishda xato:\n{e}")
         await state.finish()
+
     finally:
         await client.disconnect()
+
 
 @dp.message_handler(state=AddNum.code)
 async def get_code(msg: types.Message, state: FSMContext):
@@ -230,38 +236,52 @@ async def get_code(msg: types.Message, state: FSMContext):
         await state.finish()
         await numbers_menu(msg)
         return
-    
-    d = await state.get_data()
+
+    data = await state.get_data()
+    phone = data["phone"]
+    session = data["session"]
+
     client = TelegramClient(
-        f"{SESS_DIR}/{d['session']}", 
-        API_ID, 
+        f"{SESS_DIR}/{session}",
+        API_ID,
         API_HASH,
         device_model="Desktop",
         system_version="Windows 10",
         app_version="4.12.2"
     )
-    
+
     await client.connect()
     try:
-        code = msg.text.strip().replace(" ", "")
-        await client.sign_in(d['phone'], code, phone_code_hash=d['hash'])
-        
+        code = msg.text.replace(" ", "").strip()
+
+        # ✅ TO‘G‘RI SIGN IN
+        await client.sign_in(phone=phone, code=code)
+
         with db() as c:
-            c.execute("INSERT INTO numbers (user_id, session) VALUES (?,?)", (msg.from_user.id, d['session']))
-        
+            c.execute(
+                "INSERT INTO numbers (user_id, session) VALUES (?, ?)",
+                (msg.from_user.id, session)
+            )
+
         await msg.answer("✅ Akkaunt muvaffaqiyatli ulandi!")
         await state.finish()
         await numbers_menu(msg)
-        
+
     except SessionPasswordNeededError:
         await AddNum.password.set()
         kb = types.ReplyKeyboardMarkup(resize_keyboard=True)
         kb.add("⬅️ Orqaga")
-        await msg.answer("🔐 Akkauntda 2-bosqichli parol bor. Parolni kiriting:", reply_markup=kb)
+        await msg.answer(
+            "🔐 Akkauntda 2 bosqichli parol bor.\nParolni kiriting:",
+            reply_markup=kb
+        )
+
     except Exception as e:
-        await msg.answer(f"❌ Kod xato yoki muddati o'tgan: {e}")
+        await msg.answer(f"❌ Kod xato yoki eskirgan:\n{e}")
+
     finally:
         await client.disconnect()
+
 
 @dp.message_handler(state=AddNum.password)
 async def get_password(msg: types.Message, state: FSMContext):
@@ -269,57 +289,86 @@ async def get_password(msg: types.Message, state: FSMContext):
         await state.finish()
         await numbers_menu(msg)
         return
-    
-    d = await state.get_data()
+
+    data = await state.get_data()
+    session = data["session"]
+
     client = TelegramClient(
-        f"{SESS_DIR}/{d['session']}", 
-        API_ID, 
+        f"{SESS_DIR}/{session}",
+        API_ID,
         API_HASH,
         device_model="Desktop",
         system_version="Windows 10",
         app_version="4.12.2"
     )
-    
+
     await client.connect()
     try:
         await client.sign_in(password=msg.text.strip())
+
         with db() as c:
-            c.execute("INSERT INTO numbers (user_id, session) VALUES (?,?)", (msg.from_user.id, d['session']))
-        await msg.answer("✅ Akkaunt (parol orqali) ulandi!")
+            c.execute(
+                "INSERT INTO numbers (user_id, session) VALUES (?, ?)",
+                (msg.from_user.id, session)
+            )
+
+        await msg.answer("✅ Akkaunt (2FA) orqali ulandi!")
         await state.finish()
         await numbers_menu(msg)
+
     except Exception as e:
-        await msg.answer(f"❌ Parol noto‘g‘ri yoki xatolik: {e}")
+        await msg.answer(f"❌ Parol noto‘g‘ri yoki xato:\n{e}")
+
     finally:
         await client.disconnect()
-        
+
+
 # ================= SESSION O‘CHIRISH =================
+
 @dp.message_handler(lambda m: m.text == "🗑 Raqam o‘chirish")
-async def delete_session(msg):
+async def delete_session(msg: types.Message):
     with db() as c:
-        rows = c.execute("SELECT session FROM numbers WHERE user_id=?", (msg.from_user.id,)).fetchall()
+        rows = c.execute(
+            "SELECT session FROM numbers WHERE user_id=?",
+            (msg.from_user.id,)
+        ).fetchall()
+
+    if not rows:
+        await msg.answer("❌ Sessionlar mavjud emas")
+        return
+
     kb = types.InlineKeyboardMarkup()
-    for s in rows:
-        kb.add(types.InlineKeyboardButton(f"❌ {s[0]}", callback_data=f"delsess:{s[0]}"))
+    for (sess,) in rows:
+        kb.add(types.InlineKeyboardButton(
+            f"❌ {sess}",
+            callback_data=f"delsess:{sess}"
+        ))
     kb.add(types.InlineKeyboardButton("⬅️ Orqaga", callback_data="back"))
     await msg.answer("🗑 O‘chiriladigan sessionni tanlang", reply_markup=kb)
+
 
 @dp.callback_query_handler(lambda c: c.data.startswith("delsess:"))
 async def confirm_delete(call: types.CallbackQuery):
     sess = call.data.split(":")[1]
+
     if call.from_user.id in running_tasks:
         running_tasks[call.from_user.id].cancel()
+
     if call.from_user.id in running_clients:
         await running_clients[call.from_user.id].disconnect()
+
     with db() as c:
         c.execute("DELETE FROM numbers WHERE session=?", (sess,))
         c.execute("DELETE FROM selected_groups WHERE session=?", (sess,))
         c.execute("DELETE FROM stats WHERE session=?", (sess,))
+
     try:
         os.remove(f"{SESS_DIR}/{sess}.session")
     except:
         pass
+
     await call.message.edit_text("✅ Session o‘chirildi")
+
 
 # =====================================================
 # Keyingi qism: Guruhlar, Tanlangan guruhlar, Habar yuborish va Statistika
