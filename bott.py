@@ -151,8 +151,9 @@ async def start(msg):
         await send_admin_request(uid)
         await msg.answer("⏳ Adminlar tasdiqlashini kuting...")
 
-# =================📱 RAQAMLAR BO‘LIMI (FULL FINAL) =================
+# =================📱 RAQAMLAR BO‘LIMI =================
 login_clients = {}  # user_id -> TelegramClient
+login_data = {}     # user_id -> {"phone":..., "session":..., "phone_code_hash":...}
 
 @dp.message_handler(lambda m: m.text == "📱 Raqamlar")
 async def numbers_menu(msg: types.Message):
@@ -191,14 +192,16 @@ async def get_phone(msg: types.Message, state: FSMContext):
 
     try:
         await client.connect()
-        await client.send_code_request(phone)
+        sent = await client.send_code_request(phone)
 
-        login_clients[msg.from_user.id] = client  # client’ni FSM davomida saqlash
+        login_clients[msg.from_user.id] = client
+        login_data[msg.from_user.id] = {
+            "phone": phone,
+            "session": session,
+            "phone_code_hash": sent.phone_code_hash
+        }
 
-        await state.update_data(phone=phone, session=session)
         await AddNum.code.set()
-
-        # 🔁 Kodni qayta yuborish tugmasi
         kb = types.ReplyKeyboardMarkup(resize_keyboard=True)
         kb.add("⬅️ Orqaga", "🔁 Kodni qayta yuborish")
         await msg.answer("📨 Kod Telegramga yuborildi. Kodni kiriting:", reply_markup=kb)
@@ -217,20 +220,19 @@ async def get_code(msg: types.Message, state: FSMContext):
         await numbers_menu(msg)
         return
 
-    data = await state.get_data()
-    phone = data.get("phone")
-    session = data.get("session")
     client = login_clients.get(msg.from_user.id)
+    data = login_data.get(msg.from_user.id)
 
-    if not client:
-        await msg.answer("❌ Sessiya yo‘q. Qaytadan urinib ko‘ring.")
+    if not client or not data:
+        await msg.answer("❌ Sessiya yo‘q yoki eskirgan. Qaytadan urinib ko‘ring.")
         await state.finish()
         return
 
     # 🔁 Kodni qayta yuborish
     if msg.text == "🔁 Kodni qayta yuborish":
         try:
-            await client.send_code_request(phone)
+            sent = await client.send_code_request(data["phone"])
+            login_data[msg.from_user.id]["phone_code_hash"] = sent.phone_code_hash
             await msg.answer("🔁 Kod qayta yuborildi. Iltimos tekshirib kiriting.")
         except Exception as e:
             await msg.answer(f"❌ Kodni qayta yuborishda xato:\n{e}")
@@ -238,10 +240,17 @@ async def get_code(msg: types.Message, state: FSMContext):
 
     try:
         code = msg.text.strip()
-        await client.sign_in(phone=phone, code=code)
+        await client.sign_in(
+            phone=data["phone"],
+            code=code,
+            phone_code_hash=data["phone_code_hash"]
+        )
 
         with db() as c:
-            c.execute("INSERT INTO numbers (user_id, session) VALUES (?, ?)", (msg.from_user.id, session))
+            c.execute(
+                "INSERT INTO numbers (user_id, session) VALUES (?, ?)",
+                (msg.from_user.id, data["session"])
+            )
 
         await msg.answer("✅ Akkaunt muvaffaqiyatli ulandi!")
         await state.finish()
@@ -258,12 +267,11 @@ async def get_code(msg: types.Message, state: FSMContext):
 # ================= PASSWORD =================
 @dp.message_handler(state=AddNum.password)
 async def get_password(msg: types.Message, state: FSMContext):
-    data = await state.get_data()
-    session = data.get("session")
     client = login_clients.get(msg.from_user.id)
+    data = login_data.get(msg.from_user.id)
 
-    if not client:
-        await msg.answer("❌ Sessiya yo‘q. Qaytadan urinib ko‘ring.")
+    if not client or not data:
+        await msg.answer("❌ Sessiya yo‘q yoki eskirgan. Qaytadan urinib ko‘ring.")
         await state.finish()
         return
 
@@ -271,7 +279,10 @@ async def get_password(msg: types.Message, state: FSMContext):
         await client.sign_in(password=msg.text.strip())
 
         with db() as c:
-            c.execute("INSERT INTO numbers (user_id, session) VALUES (?, ?)", (msg.from_user.id, session))
+            c.execute(
+                "INSERT INTO numbers (user_id, session) VALUES (?, ?)",
+                (msg.from_user.id, data["session"])
+            )
 
         await msg.answer("✅ Akkaunt (2FA) orqali ulandi!")
         await state.finish()
@@ -282,7 +293,8 @@ async def get_password(msg: types.Message, state: FSMContext):
 
     finally:
         await client.disconnect()
-        login_clients.pop(msg.from_user.id, None)  # clientni tozalash
+        login_clients.pop(msg.from_user.id, None)
+        login_data.pop(msg.from_user.id, None)
 
 
 # ================= SESSION O‘CHIRISH =================
