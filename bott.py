@@ -151,7 +151,7 @@ async def start(msg):
         await send_admin_request(uid)
         await msg.answer("⏳ Adminlar tasdiqlashini kuting...")
 
-# =================📱 RAQAMLAR BO'LIMI (FIXED) =================
+# =================📱 RAQAMLAR BO'LIMI (FINAL WORKING) =================
 
 @dp.message_handler(lambda m: m.text == "📱 Raqamlar")
 async def numbers_menu(msg: types.Message):
@@ -178,6 +178,8 @@ async def add_number(msg: types.Message):
     )
     await AddNum.phone.set()
 
+
+# ================= PHONE =================
 
 @dp.message_handler(state=AddNum.phone, content_types=["text", "contact"])
 async def get_phone(msg: types.Message, state: FSMContext):
@@ -207,15 +209,23 @@ async def get_phone(msg: types.Message, state: FSMContext):
         app_version="4.12.2"
     )
 
-    await client.connect()
     try:
-        await client.send_code_request(phone)
+        await client.connect()
 
-        await state.update_data(phone=phone, session=session)
+        sent = await client.send_code_request(phone)
+
+        # 🔥 MUHIM: HASHNI SAQLAYMIZ
+        await state.update_data(
+            phone=phone,
+            session=session,
+            phone_code_hash=sent.phone_code_hash
+        )
+
         await AddNum.code.set()
 
         kb = types.ReplyKeyboardMarkup(resize_keyboard=True)
         kb.add("⬅️ Orqaga")
+
         await msg.answer(
             f"📨 Kod {phone} raqamiga yuborildi.\n"
             f"Telegramdan kelgan kodni kiriting:",
@@ -230,6 +240,8 @@ async def get_phone(msg: types.Message, state: FSMContext):
         await client.disconnect()
 
 
+# ================= CODE =================
+
 @dp.message_handler(state=AddNum.code)
 async def get_code(msg: types.Message, state: FSMContext):
     if msg.text == "⬅️ Orqaga":
@@ -239,9 +251,18 @@ async def get_code(msg: types.Message, state: FSMContext):
 
     data = await state.get_data()
 
-    phone = data["phone"]
-    session = data["session"]
-    phone_code_hash = data["phone_code_hash"]
+    phone = data.get("phone")
+    session = data.get("session")
+    phone_code_hash = data.get("phone_code_hash")
+
+    if not all([phone, session, phone_code_hash]):
+        await msg.answer(
+            "❌ Sessiya yo‘qoldi yoki kod eskirdi.\n"
+            "Iltimos, raqamni qaytadan kiriting."
+        )
+        await state.finish()
+        await numbers_menu(msg)
+        return
 
     client = TelegramClient(
         f"{SESS_DIR}/{session}",
@@ -252,12 +273,11 @@ async def get_code(msg: types.Message, state: FSMContext):
         app_version="4.12.2"
     )
 
-    await client.connect()
-
     try:
+        await client.connect()
+
         code = msg.text.replace(" ", "").strip()
 
-        # 🔥 MAJBURIY phone_code_hash bilan
         await client.sign_in(
             phone=phone,
             code=code,
@@ -285,6 +305,7 @@ async def get_code(msg: types.Message, state: FSMContext):
         await client.disconnect()
 
 
+# ================= PASSWORD =================
 
 @dp.message_handler(state=AddNum.password)
 async def get_password(msg: types.Message, state: FSMContext):
@@ -294,7 +315,13 @@ async def get_password(msg: types.Message, state: FSMContext):
         return
 
     data = await state.get_data()
-    session = data["session"]
+    session = data.get("session")
+
+    if not session:
+        await msg.answer("❌ Sessiya topilmadi. Qayta urinib ko‘ring.")
+        await state.finish()
+        await numbers_menu(msg)
+        return
 
     client = TelegramClient(
         f"{SESS_DIR}/{session}",
@@ -305,8 +332,8 @@ async def get_password(msg: types.Message, state: FSMContext):
         app_version="4.12.2"
     )
 
-    await client.connect()
     try:
+        await client.connect()
         await client.sign_in(password=msg.text.strip())
 
         with db() as c:
