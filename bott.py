@@ -359,6 +359,9 @@ async def confirm_delete(call: types.CallbackQuery):
 # ================= 👥 GURUHLAR =======================
 # =====================================================
 
+GROUPS_PER_PAGE = 30  # Har sahifada 30 ta guruh
+
+# ================= GURUHLAR MENYU =================
 @dp.message_handler(lambda m: m.text == "👥 Guruhlar")
 async def groups_menu(msg: types.Message):
     with db() as c:
@@ -375,63 +378,83 @@ async def groups_menu(msg: types.Message):
     for (sess,) in sessions:
         kb.add(types.InlineKeyboardButton(
             f"📱 {sess}",
-            callback_data=f"grp_sess:{sess}"
+            callback_data=f"grp_sess:{sess}:0"  # 0 - sahifa raqami
         ))
     kb.add(types.InlineKeyboardButton("⬅️ Orqaga", callback_data="grp_back"))
 
     await msg.answer("📂 Akkaunt tanlang:", reply_markup=kb)
 
 
-# ================= LOAD GROUPS =================
-@dp.callback_query_handler(lambda c: c.data.startswith("grp_sess:"))
-async def load_groups(call: types.CallbackQuery):
-    sess = call.data.split(":")[1]
-
-    # Darhol callbackni javoblaymiz
+# ================= GURUHLARNI SAHIFALASH =================
+async def load_groups_page(call: types.CallbackQuery, sess: str, page: int):
     await call.answer("⏳ Guruhlar yuklanmoqda...")
 
-    # Loading matn
     await call.message.edit_text("⏳ Guruhlar yuklanmoqda...")
 
     client = TelegramClient(f"{SESS_DIR}/{sess}", API_ID, API_HASH)
     await client.connect()
 
-    # Tanlangan guruhlarni olish
+    # Tanlangan guruhlar
     with db() as c:
-        selected = {
-            row[0] for row in c.execute(
-                "SELECT group_id FROM selected_groups WHERE user_id=? AND session=?",
-                (call.from_user.id, sess)
-            )
-        }
+        selected = {row[0] for row in c.execute(
+            "SELECT group_id FROM selected_groups WHERE user_id=? AND session=?",
+            (call.from_user.id, sess)
+        )}
+
+    # Barcha guruhlarni olish
+    all_dialogs = [d async for d in client.iter_dialogs() if d.is_group or d.is_channel]
 
     kb = types.InlineKeyboardMarkup(row_width=1)
 
-    # Async guruhlarni olish
-    async for d in client.iter_dialogs():
-        if not (d.is_group or d.is_channel):
-            continue
-
+    start = page * GROUPS_PER_PAGE
+    end = start + GROUPS_PER_PAGE
+    for d in all_dialogs[start:end]:
         mark = "✅ " if d.id in selected else ""
         title = (d.name or "No name")[:30]
-
         kb.add(types.InlineKeyboardButton(
             f"{mark}{title}",
-            callback_data=f"grp_toggle:{sess}:{d.id}"
+            callback_data=f"grp_toggle:{sess}:{d.id}:{page}"
         ))
+
+    # Sahifa tugmalari
+    nav_buttons = []
+    if start > 0:
+        nav_buttons.append(types.InlineKeyboardButton(
+            "⬅️ Oldingi", callback_data=f"grp_page:{sess}:{page-1}"
+        ))
+    if end < len(all_dialogs):
+        nav_buttons.append(types.InlineKeyboardButton(
+            "➡️ Keyingi", callback_data=f"grp_page:{sess}:{page+1}"
+        ))
+    if nav_buttons:
+        kb.row(*nav_buttons)
 
     kb.add(types.InlineKeyboardButton("⬅️ Orqaga", callback_data="grp_back"))
 
     await call.message.edit_text("👥 Guruhlar ro‘yxati:", reply_markup=kb)
-
     await client.disconnect()
+
+
+# ================= CALLBACK: SAHIFA =================
+@dp.callback_query_handler(lambda c: c.data.startswith("grp_sess:"))
+async def load_groups(call: types.CallbackQuery):
+    parts = call.data.split(":")
+    sess, page = parts[1], int(parts[2])
+    await load_groups_page(call, sess, page)
+
+
+@dp.callback_query_handler(lambda c: c.data.startswith("grp_page:"))
+async def change_page(call: types.CallbackQuery):
+    _, sess, page = call.data.split(":")
+    await load_groups_page(call, sess, int(page))
 
 
 # ================= TOGGLE GROUP =================
 @dp.callback_query_handler(lambda c: c.data.startswith("grp_toggle:"))
 async def toggle_group(call: types.CallbackQuery):
-    _, sess, gid = call.data.split(":")
+    _, sess, gid, page = call.data.split(":")
     gid = int(gid)
+    page = int(page)
     user_id = call.from_user.id
 
     # DB tekshirish
@@ -441,14 +464,12 @@ async def toggle_group(call: types.CallbackQuery):
             (user_id, sess, gid)
         ).fetchone()
 
-    # Client orqali entity olish (title)
     client = TelegramClient(f"{SESS_DIR}/{sess}", API_ID, API_HASH)
     await client.connect()
     entity = await client.get_entity(gid)
     title = entity.title[:30]
     await client.disconnect()
 
-    # DB update
     if exists:
         with db() as c:
             c.execute(
@@ -470,7 +491,7 @@ async def toggle_group(call: types.CallbackQuery):
     kb = call.message.reply_markup
     for row in kb.inline_keyboard:
         btn = row[0]
-        if btn.callback_data == call.data:
+        if btn.callback_data.startswith(f"grp_toggle:{sess}:{gid}:"):
             btn.text = prefix + title
 
     await call.message.edit_reply_markup(reply_markup=kb)
