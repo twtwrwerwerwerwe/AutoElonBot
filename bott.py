@@ -378,7 +378,7 @@ async def groups_menu(msg: types.Message):
     for (sess,) in sessions:
         kb.add(types.InlineKeyboardButton(
             f"📱 {sess}",
-            callback_data=f"grp_sess:{sess}:0"  # 0 - sahifa raqami
+            callback_data=f"grp_sess:{sess}:0"
         ))
     kb.add(types.InlineKeyboardButton("⬅️ Orqaga", callback_data="grp_back"))
 
@@ -401,28 +401,36 @@ async def load_groups_page(call: types.CallbackQuery, sess: str, page: int):
             (call.from_user.id, sess)
         )}
 
-    # Barcha guruhlarni olish
-    all_dialogs = [d async for d in client.iter_dialogs() if d.is_group or d.is_channel]
-
     kb = types.InlineKeyboardMarkup(row_width=1)
 
     start = page * GROUPS_PER_PAGE
     end = start + GROUPS_PER_PAGE
-    for d in all_dialogs[start:end]:
+    count = 0
+
+    async for d in client.iter_dialogs():
+        if not (d.is_group or d.is_channel):
+            continue
+        if count < start:
+            count += 1
+            continue
+        if count >= end:
+            break
         mark = "✅ " if d.id in selected else ""
         title = (d.name or "No name")[:30]
         kb.add(types.InlineKeyboardButton(
             f"{mark}{title}",
             callback_data=f"grp_toggle:{sess}:{d.id}:{page}"
         ))
+        count += 1
 
     # Sahifa tugmalari
     nav_buttons = []
-    if start > 0:
+    if page > 0:
         nav_buttons.append(types.InlineKeyboardButton(
             "⬅️ Oldingi", callback_data=f"grp_page:{sess}:{page-1}"
         ))
-    if end < len(all_dialogs):
+    # Agar keyingi sahifa mavjud bo‘lsa
+    if count >= end:
         nav_buttons.append(types.InlineKeyboardButton(
             "➡️ Keyingi", callback_data=f"grp_page:{sess}:{page+1}"
         ))
@@ -438,9 +446,8 @@ async def load_groups_page(call: types.CallbackQuery, sess: str, page: int):
 # ================= CALLBACK: SAHIFA =================
 @dp.callback_query_handler(lambda c: c.data.startswith("grp_sess:"))
 async def load_groups(call: types.CallbackQuery):
-    parts = call.data.split(":")
-    sess, page = parts[1], int(parts[2])
-    await load_groups_page(call, sess, page)
+    _, sess, page = call.data.split(":")
+    await load_groups_page(call, sess, int(page))
 
 
 @dp.callback_query_handler(lambda c: c.data.startswith("grp_page:"))
@@ -457,7 +464,6 @@ async def toggle_group(call: types.CallbackQuery):
     page = int(page)
     user_id = call.from_user.id
 
-    # DB tekshirish
     with db() as c:
         exists = c.execute(
             "SELECT 1 FROM selected_groups WHERE user_id=? AND session=? AND group_id=?",
