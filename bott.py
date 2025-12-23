@@ -166,15 +166,22 @@ login_data = {}
 login_clients = {}
 login_data = {}
 
-# 🔙 UNIVERSAL BACK
+# 🔙 UNIVERSAL BACK (TO‘G‘RILANDI)
 @dp.message_handler(lambda m: m.text == "⬅️ Orqaga", state="*")
-async def back_anywhere(msg: types.Message, state: FSMContext):
-    await state.finish()
-    await numbers_menu(msg)
+async def back_handler(msg: types.Message, state: FSMContext):
+    current_state = await state.get_state()
+
+    if current_state is None:
+        # 📱 Raqamlar bo‘limidan → ASOSIY MENYU
+        await main_menu(msg)
+    else:
+        # 📞 Raqam qo‘shish / kod / parol ichidan → RAQAMLAR
+        await state.finish()
+        await numbers_menu(msg)
 
 
 @dp.message_handler(lambda m: m.text == "📱 Raqamlar")
-async def numbers_menu(msg):
+async def numbers_menu(msg: types.Message):
     kb = types.ReplyKeyboardMarkup(resize_keyboard=True)
     kb.add("➕ Raqam qo‘shish", "🗑 Raqam o‘chirish")
     kb.add("⬅️ Orqaga")
@@ -182,7 +189,7 @@ async def numbers_menu(msg):
 
 
 @dp.message_handler(lambda m: m.text == "➕ Raqam qo‘shish")
-async def add_number(msg):
+async def add_number(msg: types.Message):
     kb = types.ReplyKeyboardMarkup(resize_keyboard=True)
     kb.add(types.KeyboardButton("📱 Raqamni ulashish", request_contact=True))
     kb.add("⬅️ Orqaga")
@@ -192,7 +199,7 @@ async def add_number(msg):
 
 # ================= PHONE =================
 @dp.message_handler(state=AddNum.phone, content_types=["text", "contact"])
-async def get_phone(msg, state):
+async def get_phone(msg: types.Message, state: FSMContext):
     phone = msg.contact.phone_number if msg.contact else msg.text.strip()
     if not phone.startswith("+"):
         phone = "+" + phone
@@ -225,7 +232,7 @@ async def get_phone(msg, state):
 
 # ================= CODE =================
 @dp.message_handler(state=AddNum.code)
-async def get_code(msg, state):
+async def get_code(msg: types.Message, state: FSMContext):
     data = login_data.get(msg.from_user.id)
     client = login_clients.get(msg.from_user.id)
 
@@ -272,7 +279,7 @@ async def get_code(msg, state):
 
 # ================= PASSWORD =================
 @dp.message_handler(state=AddNum.password)
-async def get_password(msg, state):
+async def get_password(msg: types.Message, state: FSMContext):
     data = login_data.get(msg.from_user.id)
     client = login_clients.get(msg.from_user.id)
 
@@ -297,8 +304,6 @@ async def get_password(msg, state):
         login_data.pop(msg.from_user.id, None)
         await state.finish()
         await numbers_menu(msg)
-
-
 
 # ================= SESSION O‘CHIRISH =================
 
@@ -355,7 +360,7 @@ async def confirm_delete(call: types.CallbackQuery):
 # =====================================================
 
 @dp.message_handler(lambda m: m.text == "👥 Guruhlar")
-async def groups_menu(msg):
+async def groups_menu(msg: types.Message):
     with db() as c:
         sessions = c.execute(
             "SELECT session FROM numbers WHERE user_id=?",
@@ -382,9 +387,16 @@ async def groups_menu(msg):
 async def load_groups(call: types.CallbackQuery):
     sess = call.data.split(":")[1]
 
+    # Darhol callbackni javoblaymiz
+    await call.answer("⏳ Guruhlar yuklanmoqda...")
+
+    # Loading matn
+    await call.message.edit_text("⏳ Guruhlar yuklanmoqda...")
+
     client = TelegramClient(f"{SESS_DIR}/{sess}", API_ID, API_HASH)
     await client.connect()
 
+    # Tanlangan guruhlarni olish
     with db() as c:
         selected = {
             row[0] for row in c.execute(
@@ -395,6 +407,7 @@ async def load_groups(call: types.CallbackQuery):
 
     kb = types.InlineKeyboardMarkup(row_width=1)
 
+    # Async guruhlarni olish
     async for d in client.iter_dialogs():
         if not (d.is_group or d.is_channel):
             continue
@@ -410,8 +423,8 @@ async def load_groups(call: types.CallbackQuery):
     kb.add(types.InlineKeyboardButton("⬅️ Orqaga", callback_data="grp_back"))
 
     await call.message.edit_text("👥 Guruhlar ro‘yxati:", reply_markup=kb)
+
     await client.disconnect()
-    await call.answer()
 
 
 # ================= TOGGLE GROUP =================
@@ -421,18 +434,21 @@ async def toggle_group(call: types.CallbackQuery):
     gid = int(gid)
     user_id = call.from_user.id
 
+    # DB tekshirish
     with db() as c:
         exists = c.execute(
             "SELECT 1 FROM selected_groups WHERE user_id=? AND session=? AND group_id=?",
             (user_id, sess, gid)
         ).fetchone()
 
+    # Client orqali entity olish (title)
     client = TelegramClient(f"{SESS_DIR}/{sess}", API_ID, API_HASH)
     await client.connect()
     entity = await client.get_entity(gid)
     title = entity.title[:30]
     await client.disconnect()
 
+    # DB update
     if exists:
         with db() as c:
             c.execute(
@@ -450,7 +466,7 @@ async def toggle_group(call: types.CallbackQuery):
         prefix = "✅ "
         await call.answer("✅ Guruh tanlandi")
 
-    # 🔄 TUGMANI JOYIDA YANGILASH
+    # Inline tugmani yangilash
     kb = call.message.reply_markup
     for row in kb.inline_keyboard:
         btn = row[0]
@@ -465,6 +481,7 @@ async def toggle_group(call: types.CallbackQuery):
 async def grp_back(call: types.CallbackQuery):
     await main_menu(call.message)
     await call.answer()
+
 
 
 # =====================================================
