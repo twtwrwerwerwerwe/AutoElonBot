@@ -359,7 +359,7 @@ async def confirm_delete(call: types.CallbackQuery):
 # ================= 👥 GURUHLAR =======================
 # =====================================================
 
-GROUPS_PER_PAGE = 30  # Har sahifada 30 ta guruh
+GROUPS_PER_PAGE = 25  # Har sahifada 30 ta guruh
 
 # ================= GURUHLAR MENYU =================
 @dp.message_handler(lambda m: m.text == "👥 Guruhlar")
@@ -416,7 +416,7 @@ async def load_groups_page(call: types.CallbackQuery, sess: str, page: int):
         if count >= end:
             break
         mark = "✅ " if d.id in selected else ""
-        title = (d.name or "No name")[:30]
+        title = (d.name or "No name")[:25]
         kb.add(types.InlineKeyboardButton(
             f"{mark}{title}",
             callback_data=f"grp_toggle:{sess}:{d.id}:{page}"
@@ -473,7 +473,7 @@ async def toggle_group(call: types.CallbackQuery):
     client = TelegramClient(f"{SESS_DIR}/{sess}", API_ID, API_HASH)
     await client.connect()
     entity = await client.get_entity(gid)
-    title = entity.title[:30]
+    title = entity.title[:25]
     await client.disconnect()
 
     if exists:
