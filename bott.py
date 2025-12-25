@@ -76,8 +76,12 @@ async def main_menu(msg):
 # ================= ADMIN =================
 from aiogram.utils.markdown import hlink
 
-# ================= ADMIN REQUEST =================
 async def send_admin_request(user_id: int):
+    """
+    Foydalanuvchi botga kirishni so'raganda adminlarga xabar yuboradi
+    va foydalanuvchiga tasdiqlash yuborilganini bildiradi.
+    Bosilganda profil ochiladi.
+    """
     kb = types.InlineKeyboardMarkup(row_width=2)
     kb.add(
         types.InlineKeyboardButton("✅ Tasdiqlash", callback_data=f"approve:{user_id}"),
@@ -87,17 +91,14 @@ async def send_admin_request(user_id: int):
     pending_requests[user_id] = []
     successful_admins = []
 
-    # 👤 BOSILADIGAN PROFIL LINK
-    user_profile = hlink(
-        f"👤 Foydalanuvchi: {user_id}",
-        f"tg://user?id={user_id}"
-    )
+    # 🔗 Bosiladigan profil linki
+    user_profile_link = hlink(f"Foydalanuvchi: {user_id}", f"tg://user?id={user_id}")
 
     for admin in ADMINS:
         try:
             msg = await bot.send_message(
                 admin,
-                f"{user_profile}\n\n📩 Botga kirishga ruxsat so‘rayapti",
+                f"{user_profile_link}\n📩 Botga kirishga ruxsat so‘rayapti",
                 parse_mode="HTML",
                 reply_markup=kb
             )
@@ -107,15 +108,9 @@ async def send_admin_request(user_id: int):
             print(f"❌ Adminga xabar yuborib bo‘lmadi ({admin}): {e}")
 
     if successful_admins:
-        await bot.send_message(
-            user_id,
-            "⏳ So‘rovingiz adminlarga yuborildi. Javobni kuting."
-        )
+        await bot.send_message(user_id, "✅ So‘rovingiz adminlarga yuborildi.")
     else:
-        await bot.send_message(
-            user_id,
-            "❌ Adminlarga so‘rov yuborib bo‘lmadi. Keyinroq urinib ko‘ring."
-        )
+        await bot.send_message(user_id, "❌ Adminlarga so‘rov yuborib bo‘lmadi. Keyinroq urinib ko‘ring.")
 
 
 
