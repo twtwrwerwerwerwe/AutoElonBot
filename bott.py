@@ -74,13 +74,11 @@ async def main_menu(msg):
     await msg.answer("🏠 Asosiy menyu", reply_markup=kb)
 
 # ================= ADMIN =================
+from aiogram.utils.markdown import hlink
+
 # ================= ADMIN REQUEST =================
 async def send_admin_request(user_id: int):
-    """
-    Foydalanuvchi botga kirishni so'raganda adminlarga xabar yuboradi
-    va foydalanuvchiga tasdiqlash yuborilganini bildiradi.
-    """
-    kb = types.InlineKeyboardMarkup()
+    kb = types.InlineKeyboardMarkup(row_width=2)
     kb.add(
         types.InlineKeyboardButton("✅ Tasdiqlash", callback_data=f"approve:{user_id}"),
         types.InlineKeyboardButton("❌ Rad etish", callback_data=f"reject:{user_id}")
@@ -89,11 +87,17 @@ async def send_admin_request(user_id: int):
     pending_requests[user_id] = []
     successful_admins = []
 
+    # 👤 BOSILADIGAN PROFIL LINK
+    user_profile = hlink(
+        f"👤 Foydalanuvchi: {user_id}",
+        f"tg://user?id={user_id}"
+    )
+
     for admin in ADMINS:
         try:
             msg = await bot.send_message(
                 admin,
-                f"👤 Foydalanuvchi <a href='tg://user?id={user_id}'>{user_id}</a> botga kirishni so‘rayapti",
+                f"{user_profile}\n\n📩 Botga kirishga ruxsat so‘rayapti",
                 parse_mode="HTML",
                 reply_markup=kb
             )
@@ -103,9 +107,16 @@ async def send_admin_request(user_id: int):
             print(f"❌ Adminga xabar yuborib bo‘lmadi ({admin}): {e}")
 
     if successful_admins:
-        await bot.send_message(user_id, f"✅ Sorov adminlarga yuborildi: {', '.join(successful_admins)}")
+        await bot.send_message(
+            user_id,
+            "⏳ So‘rovingiz adminlarga yuborildi. Javobni kuting."
+        )
     else:
-        await bot.send_message(user_id, "❌ Adminlarga sorov yuborib bo‘lmadi. Keyinroq urinib ko‘ring.")
+        await bot.send_message(
+            user_id,
+            "❌ Adminlarga so‘rov yuborib bo‘lmadi. Keyinroq urinib ko‘ring."
+        )
+
 
 
 @dp.callback_query_handler(lambda c: c.data.startswith(("approve:", "reject:")))
@@ -163,23 +174,43 @@ login_data = {}
 # ================= 📱 RAQAMLAR =======================
 # =====================================================
 
-login_clients = {}
-login_data = {}
+import re
+import asyncio
+from aiogram import types
+from aiogram.dispatcher import FSMContext
+from aiogram.dispatcher.filters.state import State, StatesGroup
+from telethon import TelegramClient
+from telethon.errors import SessionPasswordNeededError
 
-# 🔙 UNIVERSAL BACK (TO‘G‘RILANDI)
+# ================= GLOBAL =================
+login_clients = {}      # user_id -> TelegramClient
+login_data = {}         # user_id -> dict
+login_lock = asyncio.Lock()
+
+# ================= STATES =================
+class AddNum(StatesGroup):
+    phone = State()
+    code = State()
+    password = State()
+
+# ================= HELPERS =================
+async def clear_login(user_id: int, state: FSMContext):
+    client = login_clients.pop(user_id, None)
+    login_data.pop(user_id, None)
+    if client:
+        try:
+            await client.disconnect()
+        except:
+            pass
+    await state.finish()
+
+# ================= BACK =================
 @dp.message_handler(lambda m: m.text == "⬅️ Orqaga", state="*")
 async def back_handler(msg: types.Message, state: FSMContext):
-    current_state = await state.get_state()
+    await clear_login(msg.from_user.id, state)
+    await main_menu(msg)
 
-    if current_state is None:
-        # 📱 Raqamlar bo‘limidan → ASOSIY MENYU
-        await main_menu(msg)
-    else:
-        # 📞 Raqam qo‘shish / kod / parol ichidan → RAQAMLAR
-        await state.finish()
-        await numbers_menu(msg)
-
-
+# ================= MENU =================
 @dp.message_handler(lambda m: m.text == "📱 Raqamlar")
 async def numbers_menu(msg: types.Message):
     kb = types.ReplyKeyboardMarkup(resize_keyboard=True)
@@ -187,48 +218,50 @@ async def numbers_menu(msg: types.Message):
     kb.add("⬅️ Orqaga")
     await msg.answer("📱 Raqamlar bo‘limi", reply_markup=kb)
 
-
+# ================= ADD NUMBER =================
 @dp.message_handler(lambda m: m.text == "➕ Raqam qo‘shish")
 async def add_number(msg: types.Message):
+    if msg.from_user.id in login_clients:
+        await msg.answer("⏳ Avvalgi ulanish tugashini kuting")
+        return
+
     kb = types.ReplyKeyboardMarkup(resize_keyboard=True)
     kb.add(types.KeyboardButton("📱 Raqamni ulashish", request_contact=True))
     kb.add("⬅️ Orqaga")
     await msg.answer("📞 Telefon raqam kiriting (+998...)", reply_markup=kb)
     await AddNum.phone.set()
 
-
 # ================= PHONE =================
 @dp.message_handler(state=AddNum.phone, content_types=["text", "contact"])
 async def get_phone(msg: types.Message, state: FSMContext):
-    phone = msg.contact.phone_number if msg.contact else msg.text.strip()
-    if not phone.startswith("+"):
-        phone = "+" + phone
+    async with login_lock:
+        phone = msg.contact.phone_number if msg.contact else msg.text.strip()
+        if not phone.startswith("+"):
+            phone = "+" + phone
 
-    session = phone.replace("+", "")
-    client = TelegramClient(f"{SESS_DIR}/{session}", API_ID, API_HASH)
-    await client.connect()
+        session = phone.replace("+", "")
+        client = TelegramClient(f"{SESS_DIR}/{session}", API_ID, API_HASH)
+        await client.connect()
 
-    try:
-        sent = await client.send_code_request(phone)
+        try:
+            sent = await client.send_code_request(phone)
 
-        login_clients[msg.from_user.id] = client
-        login_data[msg.from_user.id] = {
-            "phone": phone,
-            "session": session,
-            "hash": sent.phone_code_hash
-        }
+            login_clients[msg.from_user.id] = client
+            login_data[msg.from_user.id] = {
+                "phone": phone,
+                "session": session,
+                "hash": sent.phone_code_hash
+            }
 
-        kb = types.ReplyKeyboardMarkup(resize_keyboard=True)
-        kb.add("🔁 Kodni qayta yuborish", "⬅️ Orqaga")
+            kb = types.ReplyKeyboardMarkup(resize_keyboard=True)
+            kb.add("🔁 Kodni qayta yuborish", "⬅️ Orqaga")
 
-        await AddNum.code.set()
-        await msg.answer("📨 SMS kodni kiriting:", reply_markup=kb)
+            await AddNum.code.set()
+            await msg.answer("📨 SMS kodni kiriting:", reply_markup=kb)
 
-    except Exception as e:
-        await msg.answer(f"❌ Kod yuborilmadi:\n{e}")
-        await client.disconnect()
-        await state.finish()
-
+        except Exception as e:
+            await msg.answer(f"❌ Kod yuborilmadi:\n{e}")
+            await clear_login(msg.from_user.id, state)
 
 # ================= CODE =================
 @dp.message_handler(state=AddNum.code)
@@ -238,7 +271,7 @@ async def get_code(msg: types.Message, state: FSMContext):
 
     if not data or not client:
         await msg.answer("❌ Sessiya yo‘q")
-        await state.finish()
+        await clear_login(msg.from_user.id, state)
         return
 
     if msg.text == "🔁 Kodni qayta yuborish":
@@ -263,7 +296,7 @@ async def get_code(msg: types.Message, state: FSMContext):
 
     except Exception as e:
         await msg.answer(f"❌ Kod xato:\n{e}")
-        await state.finish()
+        await clear_login(msg.from_user.id, state)
         return
 
     with db() as c:
@@ -273,9 +306,8 @@ async def get_code(msg: types.Message, state: FSMContext):
         )
 
     await msg.answer("✅ Profil qo‘shildi")
-    await state.finish()
+    await clear_login(msg.from_user.id, state)
     await numbers_menu(msg)
-
 
 # ================= PASSWORD =================
 @dp.message_handler(state=AddNum.password)
@@ -298,12 +330,9 @@ async def get_password(msg: types.Message, state: FSMContext):
         await msg.answer(f"❌ Parol xato:\n{e}")
         return
 
-    finally:
-        await client.disconnect()
-        login_clients.pop(msg.from_user.id, None)
-        login_data.pop(msg.from_user.id, None)
-        await state.finish()
-        await numbers_menu(msg)
+    await clear_login(msg.from_user.id, state)
+    await numbers_menu(msg)
+
 
 # ================= SESSION O‘CHIRISH =================
 
