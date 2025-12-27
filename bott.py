@@ -32,6 +32,18 @@ pending_requests = {}      # user_id -> [(admin_id, msg_id)]
 running_tasks = {}
 running_clients = {}
 shadow_banned = set()
+# ================= TELETHON GLOBAL CACHE =================
+telethon_clients = {}   # session -> TelegramClient
+telethon_locks = {}     # session -> asyncio.Lock()
+
+async def get_client(sess: str):
+    if sess not in telethon_clients:
+        client = TelegramClient(f"{SESS_DIR}/{sess}", API_ID, API_HASH)
+        await client.start()
+        telethon_clients[sess] = client
+        telethon_locks[sess] = asyncio.Lock()
+    return telethon_clients[sess], telethon_locks[sess]
+
 
 # ================= DATABASE =================
 def db():
@@ -190,14 +202,23 @@ class AddNum(StatesGroup):
 
 # ================= HELPERS =================
 async def clear_login(user_id: int, state: FSMContext):
+    """
+    Login (raqam qo‘shish) jarayonini tozalaydi.
+    Bu client FAFAQAT login uchun ishlatiladi,
+    shuning uchun disconnect qilish TO‘G‘RI.
+    """
     client = login_clients.pop(user_id, None)
     login_data.pop(user_id, None)
+
     if client:
         try:
-            await client.disconnect()
-        except:
-            pass
+            if client.is_connected():
+                await client.disconnect()
+        except Exception as e:
+            print(f"Login client disconnect error: {e}")
+
     await state.finish()
+
 
 # ================= BACK =================
 @dp.message_handler(lambda m: m.text == "⬅️ Orqaga", state="*")
@@ -356,24 +377,37 @@ async def delete_session(msg: types.Message):
 @dp.callback_query_handler(lambda c: c.data.startswith("delsess:"))
 async def confirm_delete(call: types.CallbackQuery):
     sess = call.data.split(":")[1]
+    user_id = call.from_user.id
 
-    if call.from_user.id in running_tasks:
-        running_tasks[call.from_user.id].cancel()
+    # Taskni bekor qilish
+    task = running_tasks.pop(user_id, None)
+    if task:
+        task.cancel()
 
-    if call.from_user.id in running_clients:
-        await running_clients[call.from_user.id].disconnect()
+    # Clientni xavfsiz tozalash
+    client = running_clients.pop(user_id, None)
+    lock = telethon_locks.get(sess)
+    if client and lock:
+        async with lock:
+            try:
+                await client.disconnect()
+            except:
+                pass
 
+    # DB dan o‘chirish
     with db() as c:
         c.execute("DELETE FROM numbers WHERE session=?", (sess,))
         c.execute("DELETE FROM selected_groups WHERE session=?", (sess,))
         c.execute("DELETE FROM stats WHERE session=?", (sess,))
 
+    # Session faylini o‘chirish
     try:
         os.remove(f"{SESS_DIR}/{sess}.session")
     except:
         pass
 
     await call.message.edit_text("✅ Session o‘chirildi")
+
 
 
 # =====================================================
@@ -426,17 +460,20 @@ async def grp_session_menu(call: types.CallbackQuery):
 # =====================================================
 # 📥 BARCHA GURUHLARNI OLISH (STABLE)
 # =====================================================
-async def fetch_all_groups(sess):
-    client = TelegramClient(f"{SESS_DIR}/{sess}", API_ID, API_HASH)
-    await client.connect()
+# =====================================================
+# 📥 BARCHA GURUHLARNI OLISH (SAFE + MULTI USER)
+# =====================================================
+async def fetch_all_groups(sess: str):
+    client, lock = await get_client(sess)
 
-    dialogs = []
-    async for d in client.iter_dialogs():
-        if d.is_group or d.is_channel:
-            dialogs.append((d.id, d.name or "No name"))
+    async with lock:
+        dialogs = []
+        async for d in client.iter_dialogs():
+            if d.is_group or d.is_channel:
+                dialogs.append((d.id, d.name or "No name"))
 
-    await client.disconnect()
-    return dialogs
+        return dialogs
+
 
 
 # =====================================================
@@ -487,17 +524,20 @@ async def grp_all(call: types.CallbackQuery):
 # =====================================================
 # ✅ GURUHNI TANLASH
 # =====================================================
+# =====================================================
+# ✅ GURUHNI TANLASH (SAFE + MULTI USER)
+# =====================================================
 @dp.callback_query_handler(lambda c: c.data.startswith("grp_add:"))
 async def grp_add(call: types.CallbackQuery):
     _, sess, gid, page = call.data.split(":")
     gid = int(gid)
     user_id = call.from_user.id
 
-    client = TelegramClient(f"{SESS_DIR}/{sess}", API_ID, API_HASH)
-    await client.connect()
-    ent = await client.get_entity(gid)
-    title = ent.title[:30]
-    await client.disconnect()
+    client, lock = await get_client(sess)
+
+    async with lock:
+        ent = await client.get_entity(gid)
+        title = (ent.title or "No name")[:30]
 
     with db() as c:
         c.execute(
@@ -507,6 +547,7 @@ async def grp_add(call: types.CallbackQuery):
 
     await call.answer("✅ Tanlandi")
     await grp_all(call)
+
 
 
 # =====================================================
@@ -620,49 +661,58 @@ async def send_choose_interval(msg, state):
     await SendFlow.interval.set()
 
 @dp.message_handler(state=SendFlow.interval)
-async def start_sending(msg, state):
+async def start_sending(msg: types.Message, state: FSMContext):
     if msg.text == "⬅️ Orqaga":
         await state.finish()
         await main_menu(msg)
         return
+
     interval = int(msg.text.replace("⏱", "").strip())
     data = await state.get_data()
     session = data["session"]
     text = data["text"]
     user_id = msg.from_user.id
+
+    # DB dan guruhlarni olish
     with db() as c:
         groups = c.execute(
             "SELECT group_id FROM selected_groups WHERE user_id=? AND session=?",
             (user_id, session)
         ).fetchall()
+
     if not groups:
         await msg.answer("❌ Guruh tanlanmagan")
         return
-    client = TelegramClient(f"{SESS_DIR}/{session}", API_ID, API_HASH)
-    await client.start()
+
+    # Safe client olish
+    client, lock = await get_client(session)
     running_clients[user_id] = client
 
     async def loop():
         while True:
-            for (gid,) in groups:
-                if session in shadow_banned:
-                    await bot.send_message(user_id, "⚠️ Session shadow-banned! To‘xtatildi.")
-                    running_tasks.pop(user_id, None)
-                    return
-                try:
-                    await client.send_message(gid, text)
-                    with db() as c:
-                        c.execute(
-                            "INSERT OR REPLACE INTO stats(session, group_id, messages_sent, last_sent) VALUES(?,?,COALESCE((SELECT messages_sent FROM stats WHERE session=? AND group_id=?)+1,1),?)",
-                            (session, gid, session, gid, datetime.datetime.now().isoformat())
-                        )
-                    await asyncio.sleep(random.randint(15, 30))
-                except FloodWaitError as e:
-                    await asyncio.sleep(e.seconds + 5)
-                except UserIsBlockedError:
-                    shadow_banned.add(session)
-                    await bot.send_message(user_id, f"⚠️ {session} banlandi! Task to‘xtatildi.")
-                    return
+            async with lock:
+                for (gid,) in groups:
+                    if session in shadow_banned:
+                        await bot.send_message(user_id, "⚠️ Session shadow-banned! To‘xtatildi.")
+                        running_tasks.pop(user_id, None)
+                        return
+                    try:
+                        await client.send_message(gid, text)
+                        with db() as c:
+                            c.execute(
+                                """
+                                INSERT OR REPLACE INTO stats(session, group_id, messages_sent, last_sent)
+                                VALUES(?, ?, COALESCE((SELECT messages_sent FROM stats WHERE session=? AND group_id=?)+1,1), ?)
+                                """,
+                                (session, gid, session, gid, datetime.datetime.now().isoformat())
+                            )
+                        await asyncio.sleep(random.randint(15, 30))
+                    except FloodWaitError as e:
+                        await asyncio.sleep(e.seconds + 5)
+                    except UserIsBlockedError:
+                        shadow_banned.add(session)
+                        await bot.send_message(user_id, f"⚠️ {session} banlandi! Task to‘xtatildi.")
+                        return
             await asyncio.sleep(interval * 60)
 
     running_tasks[user_id] = asyncio.create_task(loop())
@@ -670,15 +720,32 @@ async def start_sending(msg, state):
     await msg.answer("▶️ Yuborish boshlandi")
     await main_menu(msg)
 
+
 # ================= STOP =================
 @dp.message_handler(lambda m: m.text == "⛔ Stop")
-async def stop_all(msg):
-    task = running_tasks.pop(msg.from_user.id, None)
-    client = running_clients.pop(msg.from_user.id, None)
-    if task: task.cancel()
-    if client: await client.disconnect()
+async def stop_all(msg: types.Message):
+    user_id = msg.from_user.id
+    task = running_tasks.pop(user_id, None)
+    session_client_pairs = [(sess, running_clients[sess]) for sess in running_clients if sess == user_id]
+
+    # Taskni bekor qilish
+    if task:
+        task.cancel()
+
+    # Clientni xavfsiz tozalash
+    for sess, client in session_client_pairs:
+        lock = telethon_locks.get(sess)
+        if lock:
+            async with lock:
+                try:
+                    await client.disconnect()
+                except:
+                    pass
+        running_clients.pop(sess, None)
+
     await msg.answer("⛔ To‘xtatildi")
     await main_menu(msg)
+
 
 # ================= STATISTIKA =================
 @dp.message_handler(lambda m: m.text == "📊 Statistika")
