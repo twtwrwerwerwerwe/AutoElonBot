@@ -3,7 +3,24 @@
 # Aiogram 2.25.1 + Telethon
 # =====================================================
 
-import os, asyncio, sqlite3, random, datetime
+# ================= LOG NI TO'LIQ O'CHIRISH =================
+import os
+import sys
+import logging
+
+# Hamma logginglarni o'chirish
+logging.disable(logging.CRITICAL)
+
+# stdout va stderr ga chiqadigan print larni o'chirish
+sys.stdout = open(os.devnull, 'w')
+sys.stderr = open(os.devnull, 'w')
+
+# ================= BOT VA KERAKLI KUTUBXONALAR =================
+import asyncio
+import sqlite3
+import random
+import datetime
+
 from aiogram import Bot, Dispatcher, executor, types
 from aiogram.contrib.fsm_storage.memory import MemoryStorage
 from aiogram.dispatcher.filters.state import State, StatesGroup
@@ -11,6 +28,7 @@ from aiogram.dispatcher import FSMContext
 
 from telethon import TelegramClient
 from telethon.errors import FloodWaitError, SessionPasswordNeededError, UserIsBlockedError
+
 
 # ================= CONFIG =================
 BOT_TOKEN = "8396193031:AAGzjseC_1qASNy6bWNkI4BTQnRXaiGV6eg"
