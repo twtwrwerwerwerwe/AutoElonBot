@@ -7,12 +7,13 @@
 import os
 import sys
 import logging
-import logging
 
-logging.basicConfig(
-    level=logging.INFO,  # yoki DEBUG agar hamma log kerak bo‘lsa
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
-)
+# Hamma logginglarni o'chirish
+logging.disable(logging.CRITICAL)
+
+# stdout va stderr ga chiqadigan print larni o'chirish
+sys.stdout = open(os.devnull, 'w')
+sys.stderr = open(os.devnull, 'w')
 
 # ================= BOT VA KERAKLI KUTUBXONALAR =================
 import asyncio
@@ -187,47 +188,28 @@ async def start(msg):
         await msg.answer("⏳ Adminlar tasdiqlashini kuting...")
 
 
+import re
+from telethon import TelegramClient
+from telethon.errors import SessionPasswordNeededError
 # =====================================================
-# ================= 📱 RAQAMLAR (ENTERPRISE) ==========
+# ================= 📱 RAQAMLAR (MULTI-USER SAFE) =======================
 # =====================================================
 
 import re
-import json
-import time
 import asyncio
-import aioredis
 from aiogram import types
 from aiogram.dispatcher import FSMContext
 from aiogram.dispatcher.filters.state import State, StatesGroup
 from telethon import TelegramClient
 from telethon.errors import SessionPasswordNeededError
 
-# ================= CONFIG =================
-REDIS_URL = "redis://localhost"
-LOGIN_WORKERS = 3
-LOGIN_TIMEOUT = 180      # 3 minut
+# ================= GLOBAL =================
+# Har user_id uchun session-level client va data
+login_clients = {}   # user_id -> {session: client}
+login_data = {}      # user_id -> {session: data}
 
-# ================= REDIS =================
-redis = aioredis.from_url(REDIS_URL, decode_responses=True)
-
-# ================= RUNTIME =================
-active_logins = {}   # user_id -> LoginSession
-
-
-# ================= LOGIN SESSION =================
-class LoginSession:
-    def __init__(self, user_id, phone):
-        self.user_id = user_id
-        self.phone = phone
-        self.session = phone.replace("+", "")
-        self.client = TelegramClient(
-            f"{SESS_DIR}/{self.session}",
-            API_ID,
-            API_HASH
-        )
-        self.code_hash = None
-        self.started = time.time()
-
+# Har session uchun lock
+session_locks = {}   # session -> asyncio.Lock()
 
 # ================= STATES =================
 class AddNum(StatesGroup):
@@ -235,99 +217,131 @@ class AddNum(StatesGroup):
     code = State()
     password = State()
 
+# ================= SAFE DISCONNECT =================
+async def safe_disconnect(user_id: int, session: str = None, state: FSMContext = None):
+    """
+    Xavfsiz tarzda clientni disconnect qiladi va login_data dan tozalaydi.
+    Agar session berilsa faqat o'sha sessionni, aks holda barcha sessionlarni.
+    """
+    if user_id in login_clients:
+        if session:
+            client = login_clients[user_id].pop(session, None)
+            login_data[user_id].pop(session, None)
+        else:
+            for sess, client in login_clients[user_id].items():
+                try:
+                    await client.disconnect()
+                except: pass
+            login_clients.pop(user_id, None)
+            login_data.pop(user_id, None)
 
-# =====================================================
-# 📱 MENU
-# =====================================================
+    if state:
+        await state.finish()
+
+# ================= BACK =================
+@dp.message_handler(lambda m: m.text == "⬅️ Orqaga", state="*")
+async def back_handler(msg: types.Message, state: FSMContext):
+    await safe_disconnect(msg.from_user.id, state=state)
+    await main_menu(msg)
+
+# ================= MENU =================
 @dp.message_handler(lambda m: m.text == "📱 Raqamlar")
-async def numbers_menu(msg):
+async def numbers_menu(msg: types.Message):
     kb = types.ReplyKeyboardMarkup(resize_keyboard=True)
     kb.add("➕ Raqam qo‘shish", "🗑 Raqam o‘chirish")
     kb.add("⬅️ Orqaga")
     await msg.answer("📱 Raqamlar bo‘limi", reply_markup=kb)
 
-
-# =====================================================
-# ➕ ADD NUMBER
-# =====================================================
+# ================= ADD NUMBER =================
 @dp.message_handler(lambda m: m.text == "➕ Raqam qo‘shish")
-async def add_number(msg):
-    await msg.answer("📞 Telefon raqamni kiriting (+998...)")
+async def add_number(msg: types.Message):
+    uid = msg.from_user.id
+    # Agar foydalanuvchi allaqachon session qo‘shayotgan bo‘lsa
+    if uid in login_clients and login_clients[uid]:
+        await msg.answer("⏳ Avvalgi ulanish tugashini kuting")
+        return
+
+    kb = types.ReplyKeyboardMarkup(resize_keyboard=True)
+    kb.add(types.KeyboardButton("📱 Raqamni ulashish", request_contact=True))
+    kb.add("⬅️ Orqaga")
+
+    await msg.answer("📞 Telefon raqamni kiriting (+998...)", reply_markup=kb)
     await AddNum.phone.set()
 
-
-# =====================================================
-# 📥 PHONE → REDIS QUEUE
-# =====================================================
-@dp.message_handler(state=AddNum.phone)
+# ================= PHONE =================
+@dp.message_handler(state=AddNum.phone, content_types=["text", "contact"])
 async def get_phone(msg: types.Message, state: FSMContext):
-    phone = msg.text.strip()
+    uid = msg.from_user.id
+    phone = msg.contact.phone_number if msg.contact else msg.text.strip()
     if not phone.startswith("+"):
         phone = "+" + phone
 
-    payload = {
-        "user_id": msg.from_user.id,
-        "phone": phone,
-        "time": time.time()
-    }
+    session = phone.replace("+", "")
 
-    await redis.rpush("login_queue", json.dumps(payload))
+    # Yangi client yaratish
+    client = TelegramClient(f"{SESS_DIR}/{session}", API_ID, API_HASH, timeout=20)
+    lock = asyncio.Lock()
+    session_locks[session] = lock
 
-    pos = await redis.llen("login_queue")
-    await msg.answer(f"⏳ Navbatga qo‘shildingiz.\n📍 Navbatdagi o‘rningiz: {pos}")
-    await state.finish()
+    try:
+        await client.connect()
+        sent = await asyncio.wait_for(client.send_code_request(phone), timeout=30)
 
+        # User_id ga session-level saqlash
+        if uid not in login_clients:
+            login_clients[uid] = {}
+            login_data[uid] = {}
 
-# =====================================================
-# 🔁 LOGIN WORKER
-# =====================================================
-async def login_worker(worker_id: int):
-    while True:
-        raw = await redis.blpop("login_queue")
-        data = json.loads(raw[1])
+        login_clients[uid][session] = client
+        login_data[uid][session] = {
+            "phone": phone,
+            "session": session,
+            "hash": sent.phone_code_hash
+        }
 
-        user_id = data["user_id"]
-        phone = data["phone"]
+        kb = types.ReplyKeyboardMarkup(resize_keyboard=True)
+        kb.add("🔁 Kodni qayta yuborish", "⬅️ Orqaga")
 
-        session = LoginSession(user_id, phone)
-        active_logins[user_id] = session
+        await AddNum.code.set()
+        await msg.answer("📨 SMS kodni kiriting:", reply_markup=kb)
 
-        try:
-            await session.client.connect()
-            sent = await session.client.send_code_request(phone)
-            session.code_hash = sent.phone_code_hash
+    except Exception as e:
+        await msg.answer(f"❌ Kod yuborilmadi:\n{e}")
+        await safe_disconnect(uid, session, state)
 
-            await bot.send_message(user_id, "📨 SMS kodni kiriting:")
-            await AddNum.code.set()
-
-            # timeout
-            await asyncio.sleep(LOGIN_TIMEOUT)
-            if user_id in active_logins:
-                await cleanup(user_id)
-
-        except Exception as e:
-            await bot.send_message(user_id, f"❌ Kod yuborilmadi:\n{e}")
-            await cleanup(user_id)
-
-
-# =====================================================
-# 🔢 CODE
-# =====================================================
+# ================= CODE =================
 @dp.message_handler(state=AddNum.code)
 async def get_code(msg: types.Message, state: FSMContext):
-    session = active_logins.get(msg.from_user.id)
-    if not session:
-        await msg.answer("❌ Sessiya yo‘q")
+    uid = msg.from_user.id
+    user_sessions = login_data.get(uid, {})
+    if not user_sessions:
+        await msg.answer("❌ Sessiya topilmadi")
+        return await safe_disconnect(uid, state=state)
+
+    # Hozirgi session (faqat 1 ta ulanish)
+    session, data = list(user_sessions.items())[0]
+    client = login_clients[uid][session]
+    lock = session_locks.get(session)
+
+    if msg.text == "🔁 Kodni qayta yuborish":
+        try:
+            async with lock:
+                sent = await client.send_code_request(data["phone"])
+            data["hash"] = sent.phone_code_hash
+            await msg.answer("🔁 Yangi kod yuborildi")
+        except Exception as e:
+            await msg.answer(f"❌ Qayta yuborib bo‘lmadi:\n{e}")
         return
 
     code = re.sub(r"\D", "", msg.text)
 
     try:
-        await session.client.sign_in(
-            phone=session.phone,
-            code=code,
-            phone_code_hash=session.code_hash
-        )
+        async with lock:
+            await client.sign_in(
+                phone=data["phone"],
+                code=code,
+                phone_code_hash=data["hash"]
+            )
 
     except SessionPasswordNeededError:
         await AddNum.password.set()
@@ -336,33 +350,40 @@ async def get_code(msg: types.Message, state: FSMContext):
 
     except Exception as e:
         await msg.answer(f"❌ Kod xato:\n{e}")
-        await cleanup(msg.from_user.id)
-        return
+        return await safe_disconnect(uid, session, state)
 
+    # DB ga saqlash
     with db() as c:
         c.execute(
             "INSERT INTO numbers (user_id, session) VALUES (?,?)",
-            (msg.from_user.id, session.session)
+            (uid, data["session"])
         )
 
-    await msg.answer("✅ Session qo‘shildi")
-    await cleanup(msg.from_user.id)
+    await msg.answer("✅ Session muvaffaqiyatli qo‘shildi")
+    await safe_disconnect(uid, session, state)
+    await numbers_menu(msg)
 
-
-# =====================================================
-# 🔐 PASSWORD
-# =====================================================
+# ================= PASSWORD =================
 @dp.message_handler(state=AddNum.password)
 async def get_password(msg: types.Message, state: FSMContext):
-    session = active_logins.get(msg.from_user.id)
+    uid = msg.from_user.id
+    user_sessions = login_data.get(uid, {})
+    if not user_sessions:
+        await msg.answer("❌ Sessiya topilmadi")
+        return await safe_disconnect(uid, state=state)
+
+    session, data = list(user_sessions.items())[0]
+    client = login_clients[uid][session]
+    lock = session_locks.get(session)
 
     try:
-        await session.client.sign_in(password=msg.text.strip())
+        async with lock:
+            await client.sign_in(password=msg.text.strip())
 
         with db() as c:
             c.execute(
                 "INSERT INTO numbers (user_id, session) VALUES (?,?)",
-                (msg.from_user.id, session.session)
+                (uid, data["session"])
             )
 
         await msg.answer("✅ Session qo‘shildi (2FA)")
@@ -371,26 +392,14 @@ async def get_password(msg: types.Message, state: FSMContext):
         await msg.answer(f"❌ Parol xato:\n{e}")
         return
 
-    await cleanup(msg.from_user.id)
+    await safe_disconnect(uid, session, state)
+    await numbers_menu(msg)
 
 
-# =====================================================
-# 🧹 CLEANUP + TIMEOUT
-# =====================================================
-async def cleanup(user_id: int):
-    session = active_logins.pop(user_id, None)
-    if session:
-        try:
-            await session.client.disconnect()
-        except:
-            pass
+# ================= SESSION O‘CHIRISH =================
 
-
-# =====================================================
-# 🗑 DELETE SESSION
-# =====================================================
 @dp.message_handler(lambda m: m.text == "🗑 Raqam o‘chirish")
-async def delete_session(msg):
+async def delete_session(msg: types.Message):
     with db() as c:
         rows = c.execute(
             "SELECT session FROM numbers WHERE user_id=?",
@@ -398,7 +407,7 @@ async def delete_session(msg):
         ).fetchall()
 
     if not rows:
-        await msg.answer("❌ Session yo‘q")
+        await msg.answer("❌ Sessionlar mavjud emas")
         return
 
     kb = types.InlineKeyboardMarkup()
@@ -407,16 +416,43 @@ async def delete_session(msg):
             f"❌ {sess}",
             callback_data=f"delsess:{sess}"
         ))
-    await msg.answer("🗑 O‘chirish:", reply_markup=kb)
+    kb.add(types.InlineKeyboardButton("⬅️ Orqaga", callback_data="back"))
+    await msg.answer("🗑 O‘chiriladigan sessionni tanlang", reply_markup=kb)
 
 
-# =====================================================
-# 🚀 STARTUP
-# =====================================================
-async def on_startup(dp):
-    for i in range(LOGIN_WORKERS):
-        asyncio.create_task(login_worker(i))
+@dp.callback_query_handler(lambda c: c.data.startswith("delsess:"))
+async def confirm_delete(call: types.CallbackQuery):
+    sess = call.data.split(":")[1]
+    user_id = call.from_user.id
 
+    # Taskni bekor qilish
+    task = running_tasks.pop(user_id, None)
+    if task:
+        task.cancel()
+
+    # Clientni xavfsiz tozalash
+    client = running_clients.pop(user_id, None)
+    lock = telethon_locks.get(sess)
+    if client and lock:
+        async with lock:
+            try:
+                await client.disconnect()
+            except:
+                pass
+
+    # DB dan o‘chirish
+    with db() as c:
+        c.execute("DELETE FROM numbers WHERE session=?", (sess,))
+        c.execute("DELETE FROM selected_groups WHERE session=?", (sess,))
+        c.execute("DELETE FROM stats WHERE session=?", (sess,))
+
+    # Session faylini o‘chirish
+    try:
+        os.remove(f"{SESS_DIR}/{sess}.session")
+    except:
+        pass
+
+    await call.message.edit_text("✅ Session o‘chirildi")
 
 
 
@@ -769,12 +805,4 @@ async def show_stats(msg):
 
 # ================= RUN =================
 if __name__ == "__main__":
-    import asyncio
-    from aiogram import executor
-
-    # Botni ishga tushirish
-    executor.start_polling(
-        dp,
-        skip_updates=True,      # oldingi update’larni e’tiborsiz qoldiradi
-        on_startup=on_startup   # ishga tushganda worker va queue ni ishga tushiradi
-    )
+    executor.start_polling(dp, skip_updates=True)
