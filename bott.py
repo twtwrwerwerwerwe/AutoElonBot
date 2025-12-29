@@ -397,13 +397,12 @@ async def get_password(msg: types.Message, state: FSMContext):
 
 
 # ================= SESSION O‘CHIRISH =================
-
 @dp.message_handler(lambda m: m.text == "🗑 Raqam o‘chirish")
 async def delete_session(msg: types.Message):
+    uid = msg.from_user.id
     with db() as c:
         rows = c.execute(
-            "SELECT session FROM numbers WHERE user_id=?",
-            (msg.from_user.id,)
+            "SELECT session FROM numbers WHERE user_id=?", (uid,)
         ).fetchall()
 
     if not rows:
@@ -423,22 +422,24 @@ async def delete_session(msg: types.Message):
 @dp.callback_query_handler(lambda c: c.data.startswith("delsess:"))
 async def confirm_delete(call: types.CallbackQuery):
     sess = call.data.split(":")[1]
-    user_id = call.from_user.id
+    uid = call.from_user.id
 
-    # Taskni bekor qilish
-    task = running_tasks.pop(user_id, None)
+    # running taskni bekor qilish
+    task = running_tasks.pop(uid, None)
     if task:
         task.cancel()
 
     # Clientni xavfsiz tozalash
-    client = running_clients.pop(user_id, None)
-    lock = telethon_locks.get(sess)
+    client = None
+    if uid in running_clients:
+        client = running_clients[uid].pop(sess, None)
+
+    lock = session_locks.get(sess)
     if client and lock:
         async with lock:
             try:
                 await client.disconnect()
-            except:
-                pass
+            except: pass
 
     # DB dan o‘chirish
     with db() as c:
@@ -449,27 +450,20 @@ async def confirm_delete(call: types.CallbackQuery):
     # Session faylini o‘chirish
     try:
         os.remove(f"{SESS_DIR}/{sess}.session")
-    except:
-        pass
+    except: pass
 
     await call.message.edit_text("✅ Session o‘chirildi")
 
 
-
-# =====================================================
-# Keyingi qism: Guruhlar, Tanlangan guruhlar, Habar yuborish va Statistika
-# =====================================================
+# ================= GURUHLAR BO‘LIMI =================
 GROUPS_PER_PAGE = 25
 
-# =====================================================
-# 👥 GURUHLAR → SESSION TANLASH
-# =====================================================
 @dp.message_handler(lambda m: m.text == "👥 Guruhlar")
 async def groups_menu(msg: types.Message):
+    uid = msg.from_user.id
     with db() as c:
         sessions = c.execute(
-            "SELECT session FROM numbers WHERE user_id=?",
-            (msg.from_user.id,)
+            "SELECT session FROM numbers WHERE user_id=?", (uid,)
         ).fetchall()
 
     if not sessions:
@@ -487,9 +481,6 @@ async def groups_menu(msg: types.Message):
     await msg.answer("📂 Session tanlang:", reply_markup=kb)
 
 
-# =====================================================
-# 📂 SESSION ICHI MENYU
-# =====================================================
 @dp.callback_query_handler(lambda c: c.data.startswith("grp_menu:"))
 async def grp_session_menu(call: types.CallbackQuery):
     sess = call.data.split(":")[1]
@@ -503,33 +494,23 @@ async def grp_session_menu(call: types.CallbackQuery):
     await call.answer()
 
 
-# =====================================================
-# 📥 BARCHA GURUHLARNI OLISH (STABLE)
-# =====================================================
-# =====================================================
-# 📥 BARCHA GURUHLARNI OLISH (SAFE + MULTI USER)
-# =====================================================
+# ================= BARCHA GURUHLARNI OLISH (SAFE) =================
 async def fetch_all_groups(sess: str):
     client, lock = await get_client(sess)
-
     async with lock:
         dialogs = []
         async for d in client.iter_dialogs():
             if d.is_group or d.is_channel:
                 dialogs.append((d.id, d.name or "No name"))
-
         return dialogs
 
 
-
-# =====================================================
-# ➕ GURUH QO‘SHISH (PAGINATION)
-# =====================================================
+# ================= GURUH QO‘SHISH (PAGINATION + SAFE) =================
 @dp.callback_query_handler(lambda c: c.data.startswith("grp_all:"))
 async def grp_all(call: types.CallbackQuery):
     _, sess, page = call.data.split(":")
     page = int(page)
-    user_id = call.from_user.id
+    uid = call.from_user.id
 
     all_groups = await fetch_all_groups(sess)
 
@@ -537,7 +518,7 @@ async def grp_all(call: types.CallbackQuery):
         selected_ids = {
             r[0] for r in c.execute(
                 "SELECT group_id FROM selected_groups WHERE user_id=? AND session=?",
-                (user_id, sess)
+                (uid, sess)
             )
         }
 
@@ -567,20 +548,14 @@ async def grp_all(call: types.CallbackQuery):
     await call.answer()
 
 
-# =====================================================
-# ✅ GURUHNI TANLASH
-# =====================================================
-# =====================================================
-# ✅ GURUHNI TANLASH (SAFE + MULTI USER)
-# =====================================================
+# ================= GURUHNI TANLASH (SAFE) =================
 @dp.callback_query_handler(lambda c: c.data.startswith("grp_add:"))
 async def grp_add(call: types.CallbackQuery):
     _, sess, gid, page = call.data.split(":")
     gid = int(gid)
-    user_id = call.from_user.id
+    uid = call.from_user.id
 
     client, lock = await get_client(sess)
-
     async with lock:
         ent = await client.get_entity(gid)
         title = (ent.title or "No name")[:30]
@@ -588,27 +563,24 @@ async def grp_add(call: types.CallbackQuery):
     with db() as c:
         c.execute(
             "INSERT OR IGNORE INTO selected_groups (user_id, session, group_id, title) VALUES (?,?,?,?)",
-            (user_id, sess, gid, title)
+            (uid, sess, gid, title)
         )
 
     await call.answer("✅ Tanlandi")
     await grp_all(call)
 
 
-
-# =====================================================
-# ✅ TANLANGAN GURUHLAR
-# =====================================================
+# ================= TANLANGAN GURUHLAR =================
 @dp.callback_query_handler(lambda c: c.data.startswith("grp_sel:"))
 async def grp_selected(call: types.CallbackQuery):
     _, sess, page = call.data.split(":")
     page = int(page)
-    user_id = call.from_user.id
+    uid = call.from_user.id
 
     with db() as c:
         rows = c.execute(
             "SELECT group_id, title FROM selected_groups WHERE user_id=? AND session=?",
-            (user_id, sess)
+            (uid, sess)
         ).fetchall()
 
     start = page * GROUPS_PER_PAGE
@@ -635,28 +607,24 @@ async def grp_selected(call: types.CallbackQuery):
     await call.answer()
 
 
-# =====================================================
-# ❌ TANLANGANDAN O‘CHIRISH
-# =====================================================
+# ================= TANLANGANDAN O‘CHIRISH =================
 @dp.callback_query_handler(lambda c: c.data.startswith("grp_remove:"))
 async def grp_remove(call: types.CallbackQuery):
     _, sess, gid, page = call.data.split(":")
     gid = int(gid)
-    user_id = call.from_user.id
+    uid = call.from_user.id
 
     with db() as c:
         c.execute(
             "DELETE FROM selected_groups WHERE user_id=? AND session=? AND group_id=?",
-            (user_id, sess, gid)
+            (uid, sess, gid)
         )
 
     await call.answer("❌ O‘chirildi")
     await grp_selected(call)
 
 
-# =====================================================
-# 🔙 ORQAGA
-# =====================================================
+# ================= ORQAGA =================
 @dp.callback_query_handler(lambda c: c.data == "grp_back")
 async def grp_back(call: types.CallbackQuery):
     await main_menu(call.message)
