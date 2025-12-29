@@ -14,18 +14,20 @@ from aiogram.dispatcher import FSMContext
 from telethon import TelegramClient
 from telethon.errors import FloodWaitError, SessionPasswordNeededError, UserIsBlockedError
 
-# ================= LOG CONFIG =================
-# Loglarni console va faylga yozish
+import logging
+
+# Asosiy logging faqat ERROR va CRITICAL ko‘rsatsin
 logging.basicConfig(
-    level=logging.INFO,  # Agar batafsil log kerak bo'lsa, DEBUG qiling
-    format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
-    handlers=[
-        logging.FileHandler("bot.log", encoding="utf-8"),
-        logging.StreamHandler(sys.stdout)
-    ]
+    level=logging.ERROR,
+    format="%(asctime)s | %(levelname)s | %(name)s | %(message)s"
 )
-logger = logging.getLogger(__name__)
-logger.info("Bot ishga tushdi...")
+
+# Telethon faqat xatolarni chiqarsin
+logging.getLogger("telethon").setLevel(logging.ERROR)
+
+# Aiogram faqat xatolarni chiqarsin
+logging.getLogger("aiogram").setLevel(logging.ERROR)
+
 
 
 # ================= CONFIG =================
