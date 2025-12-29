@@ -16,18 +16,17 @@ from telethon.errors import FloodWaitError, SessionPasswordNeededError, UserIsBl
 
 import logging
 
-# Asosiy logging faqat ERROR va CRITICAL ko‘rsatsin
-logging.basicConfig(
-    level=logging.ERROR,
-    format="%(asctime)s | %(levelname)s | %(name)s | %(message)s"
-)
+# Asosiy logging ERROR va CRITICAL darajaga
+logging.basicConfig(level=logging.ERROR)
 
-# Telethon faqat xatolarni chiqarsin
-logging.getLogger("telethon").setLevel(logging.ERROR)
-
-# Aiogram faqat xatolarni chiqarsin
+# Aiogram faqat ERROR va CRITICAL ko‘rsatsin
 logging.getLogger("aiogram").setLevel(logging.ERROR)
 
+# Telethon faqat ERROR va CRITICAL ko‘rsatsin
+logging.getLogger("telethon").setLevel(logging.ERROR)
+
+# Ustiga qo'shimcha: aiogram update loglarini to‘liq o‘chirish
+logging.getLogger("aiogram.dispatcher").setLevel(logging.ERROR)
 
 
 # ================= CONFIG =================
