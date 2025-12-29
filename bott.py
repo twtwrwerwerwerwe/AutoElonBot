@@ -190,7 +190,7 @@ import re
 from telethon import TelegramClient
 from telethon.errors import SessionPasswordNeededError
 # =====================================================
-# ================= 📱 RAQAMLAR (MULTI-USER SAFE) =======================
+# ================= 📱 RAQAMLAR (MULTI-USER SAFE + CODE RETRY) =======================
 # =====================================================
 
 import re
@@ -202,12 +202,12 @@ from telethon import TelegramClient
 from telethon.errors import SessionPasswordNeededError
 
 # ================= GLOBAL =================
-# Har user_id uchun session-level client va data
-login_clients = {}   # user_id -> {session: client}
-login_data = {}      # user_id -> {session: data}
-
-# Har session uchun lock
-session_locks = {}   # session -> asyncio.Lock()
+# user_id -> {session: client}
+login_clients = {}
+# user_id -> {session: data}
+login_data = {}
+# session -> asyncio.Lock
+session_locks = {}
 
 # ================= STATES =================
 class AddNum(StatesGroup):
@@ -225,10 +225,13 @@ async def safe_disconnect(user_id: int, session: str = None, state: FSMContext =
         if session:
             client = login_clients[user_id].pop(session, None)
             login_data[user_id].pop(session, None)
+            lock = session_locks.pop(session, None)
+            if client:
+                try: await client.disconnect()
+                except: pass
         else:
             for sess, client in login_clients[user_id].items():
-                try:
-                    await client.disconnect()
+                try: await client.disconnect()
                 except: pass
             login_clients.pop(user_id, None)
             login_data.pop(user_id, None)
@@ -254,7 +257,6 @@ async def numbers_menu(msg: types.Message):
 @dp.message_handler(lambda m: m.text == "➕ Raqam qo‘shish")
 async def add_number(msg: types.Message):
     uid = msg.from_user.id
-    # Agar foydalanuvchi allaqachon session qo‘shayotgan bo‘lsa
     if uid in login_clients and login_clients[uid]:
         await msg.answer("⏳ Avvalgi ulanish tugashini kuting")
         return
@@ -275,8 +277,6 @@ async def get_phone(msg: types.Message, state: FSMContext):
         phone = "+" + phone
 
     session = phone.replace("+", "")
-
-    # Yangi client yaratish
     client = TelegramClient(f"{SESS_DIR}/{session}", API_ID, API_HASH, timeout=20)
     lock = asyncio.Lock()
     session_locks[session] = lock
@@ -285,7 +285,6 @@ async def get_phone(msg: types.Message, state: FSMContext):
         await client.connect()
         sent = await asyncio.wait_for(client.send_code_request(phone), timeout=30)
 
-        # User_id ga session-level saqlash
         if uid not in login_clients:
             login_clients[uid] = {}
             login_data[uid] = {}
@@ -348,7 +347,7 @@ async def get_code(msg: types.Message, state: FSMContext):
 
     except Exception as e:
         await msg.answer(f"❌ Kod xato:\n{e}")
-        return await safe_disconnect(uid, session, state)
+        return  # Qayta urinishi mumkin, state hali tugamadi
 
     # DB ga saqlash
     with db() as c:
@@ -388,7 +387,7 @@ async def get_password(msg: types.Message, state: FSMContext):
 
     except Exception as e:
         await msg.answer(f"❌ Parol xato:\n{e}")
-        return
+        return  # Qayta urinishi mumkin
 
     await safe_disconnect(uid, session, state)
     await numbers_menu(msg)
