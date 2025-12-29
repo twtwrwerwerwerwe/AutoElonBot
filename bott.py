@@ -8,13 +8,6 @@ import os
 import sys
 import logging
 
-# Hamma logginglarni o'chirish
-logging.disable(logging.CRITICAL)
-
-# stdout va stderr ga chiqadigan print larni o'chirish
-sys.stdout = open(os.devnull, 'w')
-sys.stderr = open(os.devnull, 'w')
-
 # ================= BOT VA KERAKLI KUTUBXONALAR =================
 import asyncio
 import sqlite3
@@ -455,48 +448,53 @@ async def confirm_delete(call: types.CallbackQuery):
     await call.message.edit_text("✅ Session o‘chirildi")
 
 
-# ================= GURUHLAR BO‘LIMI =================
+# ================= GURUHLAR BO‘LIMI (MULTI-USER SAFE) =================
 GROUPS_PER_PAGE = 25
 
+# Foydalanuvchi guruhlarini ko'rsatish
 @dp.message_handler(lambda m: m.text == "👥 Guruhlar")
 async def groups_menu(msg: types.Message):
-    uid = msg.from_user.id
+    user_id = msg.from_user.id
     with db() as c:
-        sessions = c.execute(
-            "SELECT session FROM numbers WHERE user_id=?", (uid,)
-        ).fetchall()
+        sessions = [r[0] for r in c.execute("SELECT session FROM numbers WHERE user_id=?", (user_id,)).fetchall()]
 
     if not sessions:
         await msg.answer("❌ Avval akkaunt qo‘shing")
         return
 
     kb = types.InlineKeyboardMarkup()
-    for (sess,) in sessions:
-        kb.add(types.InlineKeyboardButton(
-            f"📱 {sess}",
-            callback_data=f"grp_menu:{sess}"
-        ))
+    for sess in sessions:
+        kb.add(types.InlineKeyboardButton(f"📱 {sess}", callback_data=f"grp_menu:{sess}"))
     kb.add(types.InlineKeyboardButton("⬅️ Orqaga", callback_data="grp_back"))
 
     await msg.answer("📂 Session tanlang:", reply_markup=kb)
 
 
+# Session ichidagi guruhlar menyusi
 @dp.callback_query_handler(lambda c: c.data.startswith("grp_menu:"))
 async def grp_session_menu(call: types.CallbackQuery):
     sess = call.data.split(":")[1]
-
     kb = types.InlineKeyboardMarkup()
     kb.add(types.InlineKeyboardButton("➕ Guruh qo‘shish", callback_data=f"grp_all:{sess}:0"))
     kb.add(types.InlineKeyboardButton("✅ Tanlangan guruhlar", callback_data=f"grp_sel:{sess}:0"))
     kb.add(types.InlineKeyboardButton("⬅️ Orqaga", callback_data="grp_back"))
-
     await call.message.edit_text(f"📱 Session: {sess}", reply_markup=kb)
     await call.answer()
 
 
-# ================= BARCHA GURUHLARNI OLISH (SAFE) =================
+# Session uchun client va lock qaytaruvchi helper
+async def get_session_client(sess: str):
+    if sess not in running_clients:
+        client = TelegramClient(f"{SESS_DIR}/{sess}", API_ID, API_HASH)
+        await client.connect()
+        running_clients[sess] = client
+        session_locks[sess] = asyncio.Lock()
+    return running_clients[sess], session_locks[sess]
+
+
+# Barcha guruhlarni olish (multi-user safe)
 async def fetch_all_groups(sess: str):
-    client, lock = await get_client(sess)
+    client, lock = await get_session_client(sess)
     async with lock:
         dialogs = []
         async for d in client.iter_dialogs():
@@ -505,126 +503,99 @@ async def fetch_all_groups(sess: str):
         return dialogs
 
 
-# ================= GURUH QO‘SHISH (PAGINATION + SAFE) =================
+# Guruh qo‘shish (pagination)
 @dp.callback_query_handler(lambda c: c.data.startswith("grp_all:"))
 async def grp_all(call: types.CallbackQuery):
     _, sess, page = call.data.split(":")
     page = int(page)
-    uid = call.from_user.id
+    user_id = call.from_user.id
 
     all_groups = await fetch_all_groups(sess)
 
     with db() as c:
-        selected_ids = {
-            r[0] for r in c.execute(
-                "SELECT group_id FROM selected_groups WHERE user_id=? AND session=?",
-                (uid, sess)
-            )
-        }
+        selected_ids = {r[0] for r in c.execute(
+            "SELECT group_id FROM selected_groups WHERE user_id=? AND session=?", (user_id, sess)
+        )}
 
     groups = [g for g in all_groups if g[0] not in selected_ids]
 
-    start = page * GROUPS_PER_PAGE
-    end = start + GROUPS_PER_PAGE
-
+    start, end = page * GROUPS_PER_PAGE, (page+1) * GROUPS_PER_PAGE
     kb = types.InlineKeyboardMarkup()
     for gid, title in groups[start:end]:
-        kb.add(types.InlineKeyboardButton(
-            title[:30],
-            callback_data=f"grp_add:{sess}:{gid}:{page}"
-        ))
+        kb.add(types.InlineKeyboardButton(title[:30], callback_data=f"grp_add:{sess}:{gid}:{page}"))
 
     nav = []
     if page > 0:
         nav.append(types.InlineKeyboardButton("⬅️", callback_data=f"grp_all:{sess}:{page-1}"))
     if end < len(groups):
         nav.append(types.InlineKeyboardButton("➡️", callback_data=f"grp_all:{sess}:{page+1}"))
-    if nav:
-        kb.row(*nav)
+    if nav: kb.row(*nav)
 
     kb.add(types.InlineKeyboardButton("⬅️ Orqaga", callback_data=f"grp_menu:{sess}"))
-
     await call.message.edit_text("➕ Guruh qo‘shish:", reply_markup=kb)
     await call.answer()
 
 
-# ================= GURUHNI TANLASH (SAFE) =================
+# Guruhni tanlash
 @dp.callback_query_handler(lambda c: c.data.startswith("grp_add:"))
 async def grp_add(call: types.CallbackQuery):
     _, sess, gid, page = call.data.split(":")
     gid = int(gid)
-    uid = call.from_user.id
+    user_id = call.from_user.id
 
-    client, lock = await get_client(sess)
+    client, lock = await get_session_client(sess)
     async with lock:
         ent = await client.get_entity(gid)
         title = (ent.title or "No name")[:30]
 
     with db() as c:
-        c.execute(
-            "INSERT OR IGNORE INTO selected_groups (user_id, session, group_id, title) VALUES (?,?,?,?)",
-            (uid, sess, gid, title)
-        )
+        c.execute("INSERT OR IGNORE INTO selected_groups (user_id, session, group_id, title) VALUES (?,?,?,?)",
+                  (user_id, sess, gid, title))
 
     await call.answer("✅ Tanlandi")
     await grp_all(call)
 
 
-# ================= TANLANGAN GURUHLAR =================
+# Tanlangan guruhlar
 @dp.callback_query_handler(lambda c: c.data.startswith("grp_sel:"))
 async def grp_selected(call: types.CallbackQuery):
     _, sess, page = call.data.split(":")
     page = int(page)
-    uid = call.from_user.id
+    user_id = call.from_user.id
 
     with db() as c:
-        rows = c.execute(
-            "SELECT group_id, title FROM selected_groups WHERE user_id=? AND session=?",
-            (uid, sess)
-        ).fetchall()
+        rows = c.execute("SELECT group_id, title FROM selected_groups WHERE user_id=? AND session=?", (user_id, sess)).fetchall()
 
-    start = page * GROUPS_PER_PAGE
-    end = start + GROUPS_PER_PAGE
-
+    start, end = page*GROUPS_PER_PAGE, (page+1)*GROUPS_PER_PAGE
     kb = types.InlineKeyboardMarkup()
     for gid, title in rows[start:end]:
-        kb.add(types.InlineKeyboardButton(
-            f"❌ {title}",
-            callback_data=f"grp_remove:{sess}:{gid}:{page}"
-        ))
+        kb.add(types.InlineKeyboardButton(f"❌ {title}", callback_data=f"grp_remove:{sess}:{gid}:{page}"))
 
     nav = []
-    if page > 0:
-        nav.append(types.InlineKeyboardButton("⬅️", callback_data=f"grp_sel:{sess}:{page-1}"))
-    if end < len(rows):
-        nav.append(types.InlineKeyboardButton("➡️", callback_data=f"grp_sel:{sess}:{page+1}"))
-    if nav:
-        kb.row(*nav)
+    if page > 0: nav.append(types.InlineKeyboardButton("⬅️", callback_data=f"grp_sel:{sess}:{page-1}"))
+    if end < len(rows): nav.append(types.InlineKeyboardButton("➡️", callback_data=f"grp_sel:{sess}:{page+1}"))
+    if nav: kb.row(*nav)
 
     kb.add(types.InlineKeyboardButton("⬅️ Orqaga", callback_data=f"grp_menu:{sess}"))
-
     await call.message.edit_text("✅ Tanlangan guruhlar:", reply_markup=kb)
     await call.answer()
 
 
-# ================= TANLANGANDAN O‘CHIRISH =================
+# Tanlangan guruhdan o'chirish
 @dp.callback_query_handler(lambda c: c.data.startswith("grp_remove:"))
 async def grp_remove(call: types.CallbackQuery):
     _, sess, gid, page = call.data.split(":")
     gid = int(gid)
-    uid = call.from_user.id
+    user_id = call.from_user.id
 
     with db() as c:
-        c.execute(
-            "DELETE FROM selected_groups WHERE user_id=? AND session=? AND group_id=?",
-            (uid, sess, gid)
-        )
+        c.execute("DELETE FROM selected_groups WHERE user_id=? AND session=? AND group_id=?", (user_id, sess, gid))
 
     await call.answer("❌ O‘chirildi")
     await grp_selected(call)
 
 
-# ================= ORQAGA =================
+# Orqaga
 @dp.callback_query_handler(lambda c: c.data == "grp_back")
 async def grp_back(call: types.CallbackQuery):
     await main_menu(call.message)
