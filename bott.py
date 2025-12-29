@@ -7,13 +7,12 @@
 import os
 import sys
 import logging
+import logging
 
-# Hamma logginglarni o'chirish
-logging.disable(logging.CRITICAL)
-
-# stdout va stderr ga chiqadigan print larni o'chirish
-sys.stdout = open(os.devnull, 'w')
-sys.stderr = open(os.devnull, 'w')
+logging.basicConfig(
+    level=logging.INFO,  # yoki DEBUG agar hamma log kerak bo‘lsa
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+)
 
 # ================= BOT VA KERAKLI KUTUBXONALAR =================
 import asyncio
