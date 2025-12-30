@@ -619,13 +619,33 @@ async def grp_add(call: types.CallbackQuery):
     # await call.message.edit_reply_markup(reply_markup=call.message.reply_markup)
 
     # Keyingi sahifani ko‘rsatish
-    await grp_all(types.CallbackQuery(
-        id=call.id,
-        from_user=call.from_user,
-        chat_instance=call.chat_instance,
-        message=call.message,
-        data=f"grp_all:{sess}:{page}"
-    ))
+    @dp.callback_query_handler(lambda c: c.data.startswith("grp_add:"))
+    async def grp_add(call: types.CallbackQuery):
+        parts = call.data.split(":")
+        sess = parts[1]
+        gid = int(parts[2])
+        page = int(parts[3])
+        uid = call.from_user.id
+
+        # TelegramClient bilan guruh nomini olish
+        client, lock = await get_client(sess)
+        async with lock:
+            ent = await client.get_entity(gid)
+            title = (ent.title or "No name")[:30]
+
+        # DB ga yozish
+        with db() as c:
+            c.execute(
+                "INSERT OR IGNORE INTO selected_groups (user_id, session, group_id, title) VALUES (?,?,?,?)",
+                (uid, sess, gid, title)
+            )
+
+        # Foydalanuvchiga xabar
+        await call.answer("✅ Tanlandi")
+
+        # Tugmalarni yangilash (eski tugmalarni olib tashlash)
+        await call.message.edit_reply_markup()
+
 
 
 
