@@ -549,6 +549,7 @@ async def grp_all(call: types.CallbackQuery):
     parts = call.data.split(":")
     sess = parts[1]
     page = int(parts[2])
+    uid = call.from_user.id
 
     all_groups = await fetch_all_groups(sess)
     # DB dan tanlangan guruhlarni olamiz
@@ -625,7 +626,7 @@ async def grp_add(call: types.CallbackQuery):
         sess = parts[1]
         gid = int(parts[2])
         page = int(parts[3])
-        uid = call.from_user.id
+        uid = call.from_user.id  # endi bu hech qachon None bo‘lmaydi
 
         # TelegramClient bilan guruh nomini olish
         client, lock = await get_client(sess)
@@ -643,8 +644,9 @@ async def grp_add(call: types.CallbackQuery):
         # Foydalanuvchiga xabar
         await call.answer("✅ Tanlandi")
 
-        # Tugmalarni yangilash (eski tugmalarni olib tashlash)
+        # Tugmalarni yangilash (eski callback tugmalarini olib tashlash)
         await call.message.edit_reply_markup()
+
 
 
 
