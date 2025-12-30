@@ -48,13 +48,14 @@ def load_approved_users():
     for (uid,) in rows:
         approved_users.add(uid)
 
+load_approved_users()
+
+
+# ================= GLOBALS =================
 
 # Admin tomonidan tasdiqlangan userlar
 approved_users = set()
 
-# ================= GLOBALS =================
-
-load_approved_users()
 # Admin tasdiqlash so‘rovlari
 # user_id -> [(admin_id, message_id)]
 pending_requests = {}
