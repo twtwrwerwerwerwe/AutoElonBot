@@ -14,6 +14,7 @@ from aiogram.dispatcher import FSMContext
 from telethon import TelegramClient
 from telethon.errors import FloodWaitError, SessionPasswordNeededError, UserIsBlockedError
 
+import logging
 
 # Asosiy logging ERROR va CRITICAL darajaga
 logging.basicConfig(level=logging.ERROR)
@@ -41,15 +42,6 @@ os.makedirs(SESS_DIR, exist_ok=True)
 
 bot = Bot(BOT_TOKEN)
 dp = Dispatcher(bot, storage=MemoryStorage())
-
-def load_approved_users():
-    with db() as c:
-        rows = c.execute("SELECT user_id FROM approved_users").fetchall()
-    for (uid,) in rows:
-        approved_users.add(uid)
-
-load_approved_users()
-
 
 # ================= GLOBALS =================
 
@@ -129,12 +121,6 @@ with db() as c:
         messages_sent INTEGER,
         last_sent TEXT
     )""")
-    c.execute("""
-    CREATE TABLE IF NOT EXISTS approved_users (
-        user_id INTEGER PRIMARY KEY
-    )
-    """)
-
 
 # ================= STATES =================
 class AddNum(StatesGroup):
@@ -217,27 +203,11 @@ async def admin_decision(call: types.CallbackQuery):
             pass
 
     # Foydalanuvchiga natija yuborish
-    # Foydalanuvchiga natija yuborish
     if action == "approve":
-    # DB ga saqlaymiz (1 marta tasdiq = doimiy)
-        with db() as c:
-            c.execute(
-                "INSERT OR IGNORE INTO approved_users (user_id) VALUES (?)",
-                (uid,)
-            )
-
         approved_users.add(uid)
-        await bot.send_message(
-        uid,
-        "✅ Siz tasdiqlandingiz.\n\nBot qayta ishga tushirilsa ham ruxsat saqlanadi."
-        )
+        await bot.send_message(uid, "✅ Siz tasdiqlandingiz. Botdan foydalanishingiz mumkin.")
     else:
-        await bot.send_message(
-        uid,
-        "❌ Siz admin tomonidan rad etildingiz."
-        )
-
-
+        await bot.send_message(uid, "❌ Siz admin tomonidan rad etildingiz.")
 
     # Pending requestni tozalash
     del pending_requests[uid]
