@@ -14,7 +14,6 @@ from aiogram.dispatcher import FSMContext
 from telethon import TelegramClient
 from telethon.errors import FloodWaitError, SessionPasswordNeededError, UserIsBlockedError
 
-import logging
 
 # Asosiy logging ERROR va CRITICAL darajaga
 logging.basicConfig(level=logging.ERROR)
@@ -43,11 +42,19 @@ os.makedirs(SESS_DIR, exist_ok=True)
 bot = Bot(BOT_TOKEN)
 dp = Dispatcher(bot, storage=MemoryStorage())
 
-# ================= GLOBALS =================
+def load_approved_users():
+    with db() as c:
+        rows = c.execute("SELECT user_id FROM approved_users").fetchall()
+    for (uid,) in rows:
+        approved_users.add(uid)
+
 
 # Admin tomonidan tasdiqlangan userlar
 approved_users = set()
 
+# ================= GLOBALS =================
+
+load_approved_users()
 # Admin tasdiqlash so‘rovlari
 # user_id -> [(admin_id, message_id)]
 pending_requests = {}
@@ -71,14 +78,33 @@ telethon_clients = {}
 # session -> asyncio.Lock (1 session = 1 lock)
 telethon_locks = {}
 
+# session -> list[(group_id, title)]
+groups_cache = {}
+
+
 
 async def get_client(sess: str):
-    if sess not in telethon_clients:
-        client = TelegramClient(f"{SESS_DIR}/{sess}", API_ID, API_HASH)
-        await client.start()
-        telethon_clients[sess] = client
+    if sess not in telethon_locks:
         telethon_locks[sess] = asyncio.Lock()
-    return telethon_clients[sess], telethon_locks[sess]
+
+    async with telethon_locks[sess]:
+        if sess in telethon_clients:
+            return telethon_clients[sess], telethon_locks[sess]
+
+        client = TelegramClient(
+            f"{SESS_DIR}/{sess}",
+            API_ID,
+            API_HASH
+        )
+
+        await client.connect()
+
+        if not await client.is_user_authorized():
+            raise RuntimeError(f"Session {sess} avtorizatsiyadan o‘tmagan")
+
+        telethon_clients[sess] = client
+        return client, telethon_locks[sess]
+
 
 
 # ================= DATABASE =================
@@ -102,6 +128,12 @@ with db() as c:
         messages_sent INTEGER,
         last_sent TEXT
     )""")
+    c.execute("""
+    CREATE TABLE IF NOT EXISTS approved_users (
+        user_id INTEGER PRIMARY KEY
+    )
+    """)
+
 
 # ================= STATES =================
 class AddNum(StatesGroup):
@@ -184,11 +216,27 @@ async def admin_decision(call: types.CallbackQuery):
             pass
 
     # Foydalanuvchiga natija yuborish
+    # Foydalanuvchiga natija yuborish
     if action == "approve":
+    # DB ga saqlaymiz (1 marta tasdiq = doimiy)
+        with db() as c:
+            c.execute(
+                "INSERT OR IGNORE INTO approved_users (user_id) VALUES (?)",
+                (uid,)
+            )
+
         approved_users.add(uid)
-        await bot.send_message(uid, "✅ Siz tasdiqlandingiz. Botdan foydalanishingiz mumkin.")
+        await bot.send_message(
+        uid,
+        "✅ Siz tasdiqlandingiz.\n\nBot qayta ishga tushirilsa ham ruxsat saqlanadi."
+        )
     else:
-        await bot.send_message(uid, "❌ Siz admin tomonidan rad etildingiz.")
+        await bot.send_message(
+        uid,
+        "❌ Siz admin tomonidan rad etildingiz."
+        )
+
+
 
     # Pending requestni tozalash
     del pending_requests[uid]
@@ -205,10 +253,6 @@ async def start(msg):
         await send_admin_request(uid)
         await msg.answer("⏳ Adminlar tasdiqlashini kuting...")
 
-
-import re
-from telethon import TelegramClient
-from telethon.errors import SessionPasswordNeededError
 # =====================================================
 # ================= 📱 RAQAMLAR (MULTI-USER SAFE + CODE RETRY) =======================
 # =====================================================
@@ -228,12 +272,6 @@ login_clients = {}
 login_data = {}
 # session -> asyncio.Lock
 session_locks = {}
-
-# ================= STATES =================
-class AddNum(StatesGroup):
-    phone = State()
-    code = State()
-    password = State()
 
 # ================= SAFE DISCONNECT =================
 async def safe_disconnect(user_id: int, session: str = None, state: FSMContext = None):
@@ -463,6 +501,11 @@ async def confirm_delete(call: types.CallbackQuery):
         os.remove(f"{SESS_DIR}/{sess}.session")
     except: pass
 
+    groups_cache.pop(sess, None)
+    telethon_clients.pop(sess, None)
+    telethon_locks.pop(sess, None)
+
+
     await call.message.edit_text("✅ Session o‘chirildi")
 
 
@@ -502,19 +545,31 @@ async def grp_session_menu(call: types.CallbackQuery):
     kb.add(types.InlineKeyboardButton("✅ Tanlangan guruhlar", callback_data=f"grp_sel:{sess}:0"))
     kb.add(types.InlineKeyboardButton("⬅️ Orqaga", callback_data="grp_back"))
 
-    await call.message.edit_text(f"📱 Session: {sess}", reply_markup=kb)
+    from aiogram.utils.exceptions import MessageNotModified
+
+    try:
+        await call.message.edit_text(f"📱 Session: {sess}", reply_markup=kb)
+    except MessageNotModified:
+        pass
+
     await call.answer()
 
 
 # ================= BARCHA GURUHLARNI OLISH (SAFE) =================
 async def fetch_all_groups(sess: str):
+    if sess in groups_cache:
+        return groups_cache[sess]
+
     client, lock = await get_client(sess)
     async with lock:
         dialogs = []
         async for d in client.iter_dialogs():
             if d.is_group or d.is_channel:
                 dialogs.append((d.id, d.name or "No name"))
-        return dialogs
+
+    groups_cache[sess] = dialogs
+    return dialogs
+
 
 
 # ================= GURUH QO‘SHISH (PAGINATION + SAFE) =================
@@ -558,7 +613,13 @@ async def grp_all(call: types.CallbackQuery):
 
     kb.add(types.InlineKeyboardButton("⬅️ Orqaga", callback_data=f"grp_menu:{sess}"))
 
-    await call.message.edit_text("➕ Guruh qo‘shish:", reply_markup=kb)
+    from aiogram.utils.exceptions import MessageNotModified
+
+    try:
+        await call.message.edit_text("➕ Guruh qo‘shish:", reply_markup=kb)
+    except MessageNotModified:
+        pass
+
     await call.answer()
 
 
@@ -586,8 +647,17 @@ async def grp_add(call: types.CallbackQuery):
     await call.answer("✅ Tanlandi")
 
     # 🔥 MUHIM: callback_data ni TO‘G‘RI formatda qayta chaqiramiz
-    call.data = f"grp_all:{sess}:{page}"
-    await grp_all(call)
+    await call.message.edit_reply_markup(
+        reply_markup=call.message.reply_markup
+    )
+    await grp_all(types.CallbackQuery(
+        id=call.id,
+        from_user=call.from_user,
+        chat_instance=call.chat_instance,
+        message=call.message,
+        data=f"grp_all:{sess}:{page}"
+    ))
+
 
 
 
