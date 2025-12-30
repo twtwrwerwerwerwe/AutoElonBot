@@ -550,17 +550,14 @@ async def grp_all(call: types.CallbackQuery):
     sess = parts[1]
     page = int(parts[2])
 
-    uid = call.from_user.id
-
     all_groups = await fetch_all_groups(sess)
-
+    # DB dan tanlangan guruhlarni olamiz
+    uid = call.from_user.id
     with db() as c:
-        selected_ids = {
-            r[0] for r in c.execute(
-                "SELECT group_id FROM selected_groups WHERE user_id=? AND session=?",
-                (uid, sess)
-            )
-        }
+        selected_ids = {r[0] for r in c.execute(
+            "SELECT group_id FROM selected_groups WHERE user_id=? AND session=?",
+            (uid, sess)
+        )}
 
     groups = [g for g in all_groups if g[0] not in selected_ids]
 
@@ -569,10 +566,7 @@ async def grp_all(call: types.CallbackQuery):
 
     kb = types.InlineKeyboardMarkup()
     for gid, title in groups[start:end]:
-        kb.add(types.InlineKeyboardButton(
-            title[:30],
-            callback_data=f"grp_add:{sess}:{gid}:{page}"
-        ))
+        kb.add(types.InlineKeyboardButton(title[:30], callback_data=f"grp_add:{sess}:{gid}:{page}"))
 
     nav = []
     if page > 0:
@@ -586,12 +580,14 @@ async def grp_all(call: types.CallbackQuery):
 
     from aiogram.utils.exceptions import MessageNotModified
 
+    # Safe edit
     try:
         await call.message.edit_text("➕ Guruh qo‘shish:", reply_markup=kb)
     except MessageNotModified:
         pass
 
     await call.answer()
+
 
 
 
@@ -604,11 +600,13 @@ async def grp_add(call: types.CallbackQuery):
     page = int(parts[3])
     uid = call.from_user.id
 
+    # TelegramClient bilan guruh nomini olish
     client, lock = await get_client(sess)
     async with lock:
         ent = await client.get_entity(gid)
         title = (ent.title or "No name")[:30]
 
+    # DB ga yozish
     with db() as c:
         c.execute(
             "INSERT OR IGNORE INTO selected_groups (user_id, session, group_id, title) VALUES (?,?,?,?)",
@@ -617,10 +615,10 @@ async def grp_add(call: types.CallbackQuery):
 
     await call.answer("✅ Tanlandi")
 
-    # 🔥 MUHIM: callback_data ni TO‘G‘RI formatda qayta chaqiramiz
-    await call.message.edit_reply_markup(
-        reply_markup=call.message.reply_markup
-    )
+    # 🔥 MUHIM: Bu qatorni o‘chiramiz
+    # await call.message.edit_reply_markup(reply_markup=call.message.reply_markup)
+
+    # Keyingi sahifani ko‘rsatish
     await grp_all(types.CallbackQuery(
         id=call.id,
         from_user=call.from_user,
@@ -628,6 +626,7 @@ async def grp_add(call: types.CallbackQuery):
         message=call.message,
         data=f"grp_all:{sess}:{page}"
     ))
+
 
 
 
