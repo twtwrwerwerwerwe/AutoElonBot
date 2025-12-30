@@ -467,11 +467,46 @@ async def confirm_delete(call: types.CallbackQuery):
 
 
 
-# ==================== GURUH QO‘SHISH / TANLASH / PAGINATION ====================
-
+# ================= GURUHLAR BO‘LIMI =================
 GROUPS_PER_PAGE = 25
 
-# Barcha guruhlarni olish (Telethon safe)
+@dp.message_handler(lambda m: m.text == "👥 Guruhlar")
+async def groups_menu(msg: types.Message):
+    uid = msg.from_user.id
+    with db() as c:
+        sessions = c.execute(
+            "SELECT session FROM numbers WHERE user_id=?", (uid,)
+        ).fetchall()
+
+    if not sessions:
+        await msg.answer("❌ Avval akkaunt qo‘shing")
+        return
+
+    kb = types.InlineKeyboardMarkup()
+    for (sess,) in sessions:
+        kb.add(types.InlineKeyboardButton(
+            f"📱 {sess}",
+            callback_data=f"grp_menu:{sess}"
+        ))
+    kb.add(types.InlineKeyboardButton("⬅️ Orqaga", callback_data="grp_back"))
+
+    await msg.answer("📂 Session tanlang:", reply_markup=kb)
+
+
+@dp.callback_query_handler(lambda c: c.data.startswith("grp_menu:"))
+async def grp_session_menu(call: types.CallbackQuery):
+    sess = call.data.split(":")[1]
+
+    kb = types.InlineKeyboardMarkup()
+    kb.add(types.InlineKeyboardButton("➕ Guruh qo‘shish", callback_data=f"grp_all:{sess}:0"))
+    kb.add(types.InlineKeyboardButton("✅ Tanlangan guruhlar", callback_data=f"grp_sel:{sess}:0"))
+    kb.add(types.InlineKeyboardButton("⬅️ Orqaga", callback_data="grp_back"))
+
+    await call.message.edit_text(f"📱 Session: {sess}", reply_markup=kb)
+    await call.answer()
+
+
+# ================= BARCHA GURUHLARNI OLISH (SAFE) =================
 async def fetch_all_groups(sess: str):
     client, lock = await get_client(sess)
     async with lock:
@@ -481,19 +516,25 @@ async def fetch_all_groups(sess: str):
                 dialogs.append((d.id, d.name or "No name"))
         return dialogs
 
-# Guruhlarni ko'rsatish (pagination)
-async def grp_all(call: types.CallbackQuery, page: int = 0, answer_called=False):
+
+# ================= GURUH QO‘SHISH (PAGINATION + SAFE) =================
+@dp.callback_query_handler(lambda c: c.data.startswith("grp_all:"))
+async def grp_all(call: types.CallbackQuery):
     parts = call.data.split(":")
     sess = parts[1]
+    page = int(parts[2])
 
     uid = call.from_user.id
+
     all_groups = await fetch_all_groups(sess)
 
     with db() as c:
-        selected_ids = {r[0] for r in c.execute(
-            "SELECT group_id FROM selected_groups WHERE user_id=? AND session=?",
-            (uid, sess)
-        )}
+        selected_ids = {
+            r[0] for r in c.execute(
+                "SELECT group_id FROM selected_groups WHERE user_id=? AND session=?",
+                (uid, sess)
+            )
+        }
 
     groups = [g for g in all_groups if g[0] not in selected_ids]
 
@@ -518,10 +559,11 @@ async def grp_all(call: types.CallbackQuery, page: int = 0, answer_called=False)
     kb.add(types.InlineKeyboardButton("⬅️ Orqaga", callback_data=f"grp_menu:{sess}"))
 
     await call.message.edit_text("➕ Guruh qo‘shish:", reply_markup=kb)
-    if not answer_called:
-        await call.answer()
+    await call.answer()
 
-# Callback: guruh qo‘shish
+
+
+# ================= GURUHNI TANLASH (SAFE) =================
 @dp.callback_query_handler(lambda c: c.data.startswith("grp_add:"))
 async def grp_add(call: types.CallbackQuery):
     parts = call.data.split(":")
@@ -541,14 +583,15 @@ async def grp_add(call: types.CallbackQuery):
             (uid, sess, gid, title)
         )
 
-    # Faqat bitta call.answer
-    await call.answer("✅ Tanlandi", show_alert=False)
+    await call.answer("✅ Tanlandi")
 
-    # Yangi page bilan callback chaqirish, answer_called=True
+    # 🔥 MUHIM: callback_data ni TO‘G‘RI formatda qayta chaqiramiz
     call.data = f"grp_all:{sess}:{page}"
-    await grp_all(call, page=page, answer_called=True)
+    await grp_all(call)
 
-# Callback: tanlangan guruhlar
+
+
+# ================= TANLANGAN GURUHLAR =================
 @dp.callback_query_handler(lambda c: c.data.startswith("grp_sel:"))
 async def grp_selected(call: types.CallbackQuery):
     _, sess, page = call.data.split(":")
@@ -584,12 +627,12 @@ async def grp_selected(call: types.CallbackQuery):
     await call.message.edit_text("✅ Tanlangan guruhlar:", reply_markup=kb)
     await call.answer()
 
-# Callback: tanlangan guruhni o‘chirish
+
+# ================= TANLANGANDAN O‘CHIRISH =================
 @dp.callback_query_handler(lambda c: c.data.startswith("grp_remove:"))
 async def grp_remove(call: types.CallbackQuery):
     _, sess, gid, page = call.data.split(":")
     gid = int(gid)
-    page = int(page)
     uid = call.from_user.id
 
     with db() as c:
@@ -598,13 +641,11 @@ async def grp_remove(call: types.CallbackQuery):
             (uid, sess, gid)
         )
 
-    await call.answer("❌ O‘chirildi", show_alert=False)
-
-    # Tanlangan guruhlar menuni yangilash
-    call.data = f"grp_sel:{sess}:{page}"
+    await call.answer("❌ O‘chirildi")
     await grp_selected(call)
 
-# Callback: session menuga qaytish
+
+# ================= ORQAGA =================
 @dp.callback_query_handler(lambda c: c.data == "grp_back")
 async def grp_back(call: types.CallbackQuery):
     await main_menu(call.message)
