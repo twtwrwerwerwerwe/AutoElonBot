@@ -44,14 +44,33 @@ bot = Bot(BOT_TOKEN)
 dp = Dispatcher(bot, storage=MemoryStorage())
 
 # ================= GLOBALS =================
+
+# Admin tomonidan tasdiqlangan userlar
 approved_users = set()
-pending_requests = {}      # user_id -> [(admin_id, msg_id)]
+
+# Admin tasdiqlash so‘rovlari
+# user_id -> [(admin_id, message_id)]
+pending_requests = {}
+
+# ▶️ Ishlayotgan yuborish tasklari
+# user_id -> {session: asyncio.Task}
 running_tasks = {}
+
+# 🔐 Ishlayotgan Telethon clientlar
+# user_id -> {session: TelegramClient}
 running_clients = {}
+
+# 🚫 Shadow-ban bo‘lgan sessionlar
 shadow_banned = set()
+
 # ================= TELETHON GLOBAL CACHE =================
-telethon_clients = {}   # session -> TelegramClient
-telethon_locks = {}     # session -> asyncio.Lock()
+
+# session -> TelegramClient (GLOBAL CACHE)
+telethon_clients = {}
+
+# session -> asyncio.Lock (1 session = 1 lock)
+telethon_locks = {}
+
 
 async def get_client(sess: str):
     if sess not in telethon_clients:
@@ -223,22 +242,22 @@ async def safe_disconnect(user_id: int, session: str = None, state: FSMContext =
     Agar session berilsa faqat o'sha sessionni, aks holda barcha sessionlarni.
     """
     if user_id in login_clients:
-        if session:
-            client = login_clients[user_id].pop(session, None)
-            login_data[user_id].pop(session, None)
-            lock = session_locks.pop(session, None)
+        sessions_to_remove = [session] if session else list(login_clients[user_id].keys())
+        for sess in sessions_to_remove:
+            client = login_clients[user_id].pop(sess, None)
+            login_data[user_id].pop(sess, None)
+            lock = session_locks.pop(sess, None)
             if client:
                 try: await client.disconnect()
                 except: pass
-        else:
-            for sess, client in login_clients[user_id].items():
-                try: await client.disconnect()
-                except: pass
-            login_clients.pop(user_id, None)
-            login_data.pop(user_id, None)
+
+        if not login_clients[user_id]:
+            login_clients.pop(user_id)
+            login_data.pop(user_id)
 
     if state:
         await state.finish()
+
 
 # ================= BACK =================
 @dp.message_handler(lambda m: m.text == "⬅️ Orqaga", state="*")
@@ -416,28 +435,22 @@ async def delete_session(msg: types.Message):
     kb.add(types.InlineKeyboardButton("⬅️ Orqaga", callback_data="back"))
     await msg.answer("🗑 O‘chiriladigan sessionni tanlang", reply_markup=kb)
 
-
 @dp.callback_query_handler(lambda c: c.data.startswith("delsess:"))
 async def confirm_delete(call: types.CallbackQuery):
     sess = call.data.split(":")[1]
     uid = call.from_user.id
 
-    # running taskni bekor qilish
-    task = running_tasks.pop(uid, None)
+    # Taskni to‘xtatish (multi-session safe)
+    task = running_tasks.get(uid, {}).pop(sess, None)
     if task:
         task.cancel()
 
-    # Clientni xavfsiz tozalash
-    client = None
-    if uid in running_clients:
-        client = running_clients[uid].pop(sess, None)
-
-    lock = session_locks.get(sess)
-    if client and lock:
-        async with lock:
-            try:
-                await client.disconnect()
-            except: pass
+    # Clientni xavfsiz uzish
+    client = running_clients.get(uid, {}).pop(sess, None)
+    if client:
+        try:
+            await client.disconnect()
+        except: pass
 
     # DB dan o‘chirish
     with db() as c:
@@ -451,6 +464,7 @@ async def confirm_delete(call: types.CallbackQuery):
     except: pass
 
     await call.message.edit_text("✅ Session o‘chirildi")
+
 
 
 # ================= GURUHLAR BO‘LIMI =================
@@ -506,8 +520,10 @@ async def fetch_all_groups(sess: str):
 # ================= GURUH QO‘SHISH (PAGINATION + SAFE) =================
 @dp.callback_query_handler(lambda c: c.data.startswith("grp_all:"))
 async def grp_all(call: types.CallbackQuery):
-    _, sess, page = call.data.split(":")
-    page = int(page)
+    parts = call.data.split(":")
+    sess = parts[1]
+    page = int(parts[2])
+
     uid = call.from_user.id
 
     all_groups = await fetch_all_groups(sess)
@@ -546,11 +562,14 @@ async def grp_all(call: types.CallbackQuery):
     await call.answer()
 
 
+
 # ================= GURUHNI TANLASH (SAFE) =================
 @dp.callback_query_handler(lambda c: c.data.startswith("grp_add:"))
 async def grp_add(call: types.CallbackQuery):
-    _, sess, gid, page = call.data.split(":")
-    gid = int(gid)
+    parts = call.data.split(":")
+    sess = parts[1]
+    gid = int(parts[2])
+    page = int(parts[3])
     uid = call.from_user.id
 
     client, lock = await get_client(sess)
@@ -565,7 +584,11 @@ async def grp_add(call: types.CallbackQuery):
         )
 
     await call.answer("✅ Tanlandi")
+
+    # 🔥 MUHIM: callback_data ni TO‘G‘RI formatda qayta chaqiramiz
+    call.data = f"grp_all:{sess}:{page}"
     await grp_all(call)
+
 
 
 # ================= TANLANGAN GURUHLAR =================
@@ -633,44 +656,108 @@ async def grp_back(call: types.CallbackQuery):
 # =====================================================
 # ================= ✉️ HABAR YUBORISH =================
 # =====================================================
+
+# Send loop: multi-user safe, shadow-ban check, statistikani yozadi
+async def send_loop(user_id: int, session: str, text: str, groups: list, interval: int):
+    client, lock = await get_client(session)
+
+    if user_id not in running_clients:
+        running_clients[user_id] = {}
+    running_clients[user_id][session] = client
+
+    async def loop():
+        try:
+            while True:
+                for (gid,) in groups:
+
+                    if session in shadow_banned:
+                        await bot.send_message(user_id, f"⚠️ {session} shadow-ban bo‘lgan. To‘xtatildi.")
+                        running_tasks.get(user_id, {}).pop(session, None)
+                        return
+
+                    try:
+                        async with lock:
+                            await client.send_message(gid, text)
+
+                        # Statistika
+                        with db() as c:
+                            c.execute("""
+                                INSERT OR REPLACE INTO stats(session, group_id, messages_sent, last_sent)
+                                VALUES(?, ?, COALESCE((SELECT messages_sent FROM stats WHERE session=? AND group_id=?) + 1, 1), ?)
+                            """, (session, gid, session, gid, datetime.datetime.now().isoformat()))
+
+                        # Guruhlar orasida random delay
+                        await asyncio.sleep(random.randint(15, 30))
+
+                    except FloodWaitError as e:
+                        await asyncio.sleep(e.seconds + 5)
+                    except UserIsBlockedError:
+                        shadow_banned.add(session)
+                        await bot.send_message(user_id, f"⛔ {session} bloklandi. Task to‘xtatildi.")
+                        running_tasks.get(user_id, {}).pop(session, None)
+                        return
+                    except Exception as e:
+                        logging.error(f"[SEND ERROR] {session} -> {gid}: {e}")
+
+                await asyncio.sleep(interval * 60)
+
+        except asyncio.CancelledError:
+            logging.info(f"[STOPPED] user={user_id} session={session}")
+            return
+
+    if user_id not in running_tasks:
+        running_tasks[user_id] = {}
+    running_tasks[user_id][session] = asyncio.create_task(loop())
+
+
+# ================= START SEND FLOW =================
 @dp.message_handler(lambda m: m.text == "✉️ Habar yuborish")
-async def send_start(msg):
+async def send_start(msg: types.Message):
+    uid = msg.from_user.id
     with db() as c:
-        sessions = c.execute("SELECT session FROM numbers WHERE user_id=?", (msg.from_user.id,)).fetchall()
+        sessions = c.execute("SELECT session FROM numbers WHERE user_id=?", (uid,)).fetchall()
+
     if not sessions:
         await msg.answer("❌ Avval session qo‘shing")
         return
+
     kb = types.ReplyKeyboardMarkup(resize_keyboard=True)
     for (sess,) in sessions:
         kb.add(sess)
     kb.add("⬅️ Orqaga")
+
     await msg.answer("📂 Session tanlang:", reply_markup=kb)
     await SendFlow.session.set()
 
+
 @dp.message_handler(state=SendFlow.session)
-async def send_get_text(msg, state):
+async def send_get_text(msg: types.Message, state: FSMContext):
     if msg.text == "⬅️ Orqaga":
         await state.finish()
         await main_menu(msg)
         return
+
     await state.update_data(session=msg.text)
     kb = types.ReplyKeyboardMarkup(resize_keyboard=True)
     kb.add("⬅️ Orqaga")
     await msg.answer("✏️ Habar matnini kiriting:", reply_markup=kb)
     await SendFlow.text.set()
 
+
 @dp.message_handler(state=SendFlow.text)
-async def send_choose_interval(msg, state):
+async def send_choose_interval(msg: types.Message, state: FSMContext):
     if msg.text == "⬅️ Orqaga":
         await state.finish()
         await main_menu(msg)
         return
+
     await state.update_data(text=msg.text)
     kb = types.ReplyKeyboardMarkup(resize_keyboard=True)
     kb.add("⏱ 5", "⏱ 10", "⏱ 15", "⏱ 20")
     kb.add("⬅️ Orqaga")
     await msg.answer("⏱ Intervalni tanlang (daqiqada):", reply_markup=kb)
     await SendFlow.interval.set()
+
 
 @dp.message_handler(state=SendFlow.interval)
 async def start_sending(msg: types.Message, state: FSMContext):
@@ -679,13 +766,18 @@ async def start_sending(msg: types.Message, state: FSMContext):
         await main_menu(msg)
         return
 
-    interval = int(msg.text.replace("⏱", "").strip())
+    try:
+        interval = int(msg.text.replace("⏱", "").strip())
+    except ValueError:
+        await msg.answer("❌ Noto‘g‘ri interval")
+        return
+
     data = await state.get_data()
     session = data["session"]
     text = data["text"]
     user_id = msg.from_user.id
 
-    # DB dan guruhlarni olish
+    # Guruhlarni olish
     with db() as c:
         groups = c.execute(
             "SELECT group_id FROM selected_groups WHERE user_id=? AND session=?",
@@ -696,64 +788,31 @@ async def start_sending(msg: types.Message, state: FSMContext):
         await msg.answer("❌ Guruh tanlanmagan")
         return
 
-    # Safe client olish
-    client, lock = await get_client(session)
-    running_clients[user_id] = client
-
-    async def loop():
-        while True:
-            async with lock:
-                for (gid,) in groups:
-                    if session in shadow_banned:
-                        await bot.send_message(user_id, "⚠️ Session shadow-banned! To‘xtatildi.")
-                        running_tasks.pop(user_id, None)
-                        return
-                    try:
-                        await client.send_message(gid, text)
-                        with db() as c:
-                            c.execute(
-                                """
-                                INSERT OR REPLACE INTO stats(session, group_id, messages_sent, last_sent)
-                                VALUES(?, ?, COALESCE((SELECT messages_sent FROM stats WHERE session=? AND group_id=?)+1,1), ?)
-                                """,
-                                (session, gid, session, gid, datetime.datetime.now().isoformat())
-                            )
-                        await asyncio.sleep(random.randint(15, 30))
-                    except FloodWaitError as e:
-                        await asyncio.sleep(e.seconds + 5)
-                    except UserIsBlockedError:
-                        shadow_banned.add(session)
-                        await bot.send_message(user_id, f"⚠️ {session} banlandi! Task to‘xtatildi.")
-                        return
-            await asyncio.sleep(interval * 60)
-
-    running_tasks[user_id] = asyncio.create_task(loop())
+    # Taskni ishga tushurish
+    await send_loop(user_id, session, text, groups, interval)
     await state.finish()
     await msg.answer("▶️ Yuborish boshlandi")
     await main_menu(msg)
+
 
 
 # ================= STOP =================
 @dp.message_handler(lambda m: m.text == "⛔ Stop")
 async def stop_all(msg: types.Message):
     user_id = msg.from_user.id
-    task = running_tasks.pop(user_id, None)
-    session_client_pairs = [(sess, running_clients[sess]) for sess in running_clients if sess == user_id]
 
-    # Taskni bekor qilish
-    if task:
+    # Barcha ishlayotgan tasklarni to‘xtatish
+    tasks = running_tasks.pop(user_id, {})
+    for task in tasks.values():
         task.cancel()
 
-    # Clientni xavfsiz tozalash
-    for sess, client in session_client_pairs:
-        lock = telethon_locks.get(sess)
-        if lock:
-            async with lock:
-                try:
-                    await client.disconnect()
-                except:
-                    pass
-        running_clients.pop(sess, None)
+    # Barcha clientlarni uzish
+    clients = running_clients.pop(user_id, {})
+    for client in clients.values():
+        try:
+            await client.disconnect()
+        except:
+            pass
 
     await msg.answer("⛔ To‘xtatildi")
     await main_menu(msg)
