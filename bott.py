@@ -34,7 +34,7 @@ BOT_TOKEN = "8396193031:AAGzjseC_1qASNy6bWNkI4BTQnRXaiGV6eg"
 API_ID = 32460736
 API_HASH = "285e2a8556652e6f4ffdb83658081031"
 
-ADMINS = [6302873072, 6731395876]  # adminlar IDlari
+ADMINS = [6302873072]  # adminlar IDlari
 
 DB = "bot.db"
 SESS_DIR = "sessions"
@@ -44,8 +44,10 @@ bot = Bot(BOT_TOKEN)
 dp = Dispatcher(bot, storage=MemoryStorage())
 
 # ================= GLOBALS =================
+import sqlite3
+import datetime
 
-# Admin tomonidan tasdiqlangan userlar
+# Admin tomonidan tasdiqlangan userlar (restart safe)
 approved_users = set()
 
 # Admin tasdiqlash so‘rovlari
@@ -60,7 +62,7 @@ running_tasks = {}
 # user_id -> {session: TelegramClient}
 running_clients = {}
 
-# 🚫 Shadow-ban bo‘lgan sessionlar
+# 🚫 Shadow-ban bo‘lgan sessionlar (restart safe)
 shadow_banned = set()
 
 # ================= TELETHON GLOBAL CACHE =================
@@ -73,7 +75,6 @@ telethon_locks = {}
 
 # session -> list[(group_id, title)]
 groups_cache = {}
-
 
 
 async def get_client(sess: str):
@@ -101,10 +102,15 @@ async def get_client(sess: str):
 
 
 # ================= DATABASE =================
+# ================= DATABASE =================
+DB = "bot.db"
+
 def db():
     return sqlite3.connect(DB, timeout=30)
 
+# DB yaratilishi va restartda approved_users / shadow_banned yuklanishi
 with db() as c:
+    # Numbers & groups & stats
     c.execute("""CREATE TABLE IF NOT EXISTS numbers(
         user_id INTEGER,
         session TEXT
@@ -121,6 +127,20 @@ with db() as c:
         messages_sent INTEGER,
         last_sent TEXT
     )""")
+
+    # Approved users jadvali
+    c.execute("""CREATE TABLE IF NOT EXISTS approved_users(
+        user_id INTEGER PRIMARY KEY
+    )""")
+    rows = c.execute("SELECT user_id FROM approved_users").fetchall()
+    approved_users.update([r[0] for r in rows])
+
+    # Shadow-banned sessions jadvali
+    c.execute("""CREATE TABLE IF NOT EXISTS shadow_banned(
+        session TEXT PRIMARY KEY
+    )""")
+    rows = c.execute("SELECT session FROM shadow_banned").fetchall()
+    shadow_banned.update([r[0] for r in rows])
 
 # ================= STATES =================
 class AddNum(StatesGroup):
@@ -143,48 +163,59 @@ async def main_menu(msg):
 # ================= ADMIN =================
 from aiogram.utils.markdown import hlink
 
-async def send_admin_request(user_id: int):
-    """
-    Foydalanuvchi botga kirishni so'raganda adminlarga xabar yuboradi
-    va foydalanuvchiga tasdiqlash yuborilganini bildiradi.
-    Bosilganda profil ochiladi.
-    """
+# ================= SOROV YUBORISH =================
+@dp.callback_query_handler(lambda c: c.data.startswith("send_request:"))
+async def send_request(call: types.CallbackQuery):
+    uid = int(call.data.split(":")[1])
+
+    # Agar foydalanuvchi allaqachon tasdiqlangan bo‘lsa
+    if uid in approved_users:
+        await call.answer("✅ Siz allaqachon tasdiqlangansiz.")
+        return
+
+    # Adminlarga xabar yuborish (avvalgi send_admin_request kabi)
     kb = types.InlineKeyboardMarkup(row_width=2)
     kb.add(
-        types.InlineKeyboardButton("✅ Tasdiqlash", callback_data=f"approve:{user_id}"),
-        types.InlineKeyboardButton("❌ Rad etish", callback_data=f"reject:{user_id}")
+        types.InlineKeyboardButton("✅ Tasdiqlash", callback_data=f"approve:{uid}"),
+        types.InlineKeyboardButton("❌ Rad etish", callback_data=f"reject:{uid}")
     )
 
-    pending_requests[user_id] = []
-    successful_admins = []
+    pending_requests[uid] = []
 
-    # 🔗 Bosiladigan profil linki
-    user_profile_link = hlink(f"Foydalanuvchi: {user_id}", f"tg://user?id={user_id}")
+    user_profile_link = hlink(f"Foydalanuvchi: {uid}", f"tg://user?id={uid}")
+    successful_admins = []
 
     for admin in ADMINS:
         try:
-            msg = await bot.send_message(
+            msg_admin = await bot.send_message(
                 admin,
-                f"{user_profile_link}\n📩 Botga kirishga ruxsat so‘rayapti",
+                f"{user_profile_link}\n📩 Botga kirishga ruxsat so‘rayapti (to‘lov qilgan)",
                 parse_mode="HTML",
                 reply_markup=kb
             )
-            pending_requests[user_id].append((admin, msg.message_id))
+            pending_requests[uid].append((admin, msg_admin.message_id))
             successful_admins.append(str(admin))
         except Exception as e:
             print(f"❌ Adminga xabar yuborib bo‘lmadi ({admin}): {e}")
 
     if successful_admins:
-        await bot.send_message(user_id, "✅ So‘rovingiz adminlarga yuborildi.")
+        await call.message.answer("✅ Sorov adminlarga yuborildi. Iltimos javob kuting.")
     else:
-        await bot.send_message(user_id, "❌ Adminlarga so‘rov yuborib bo‘lmadi. Keyinroq urinib ko‘ring.")
+        await call.message.answer("❌ Adminlarga sorov yuborib bo‘lmadi. Keyinroq urinib ko‘ring.")
+
+    await call.answer()
 
 
+
+# ================= ADMIN DECISION =================
+from aiogram import types
 
 @dp.callback_query_handler(lambda c: c.data.startswith(("approve:", "reject:")))
 async def admin_decision(call: types.CallbackQuery):
     """
-    Admin sorovni tasdiqlash yoki rad etish tugmasini bosganda ishlaydi.
+    Admin sorovni tasdiqlash yoki rad etish tugmasi bosganda ishlaydi.
+    Tasdiqlangan foydalanuvchilar DB-ga yoziladi,
+    rad etilganlar esa faqat xabar oladi.
     """
     action, uid = call.data.split(":")
     uid = int(uid)
@@ -205,6 +236,8 @@ async def admin_decision(call: types.CallbackQuery):
     # Foydalanuvchiga natija yuborish
     if action == "approve":
         approved_users.add(uid)
+        with db() as c:
+            c.execute("INSERT OR IGNORE INTO approved_users(user_id) VALUES (?)", (uid,))
         await bot.send_message(uid, "✅ Siz tasdiqlandingiz. Botdan foydalanishingiz mumkin.")
     else:
         await bot.send_message(uid, "❌ Siz admin tomonidan rad etildingiz.")
@@ -216,13 +249,36 @@ async def admin_decision(call: types.CallbackQuery):
     await call.answer("✔️ Bajarildi")
 
 # ================= START =================
+# ================= START =================
 @dp.message_handler(commands=["start"])
 async def start(msg):
     uid = msg.from_user.id
-    if uid in ADMINS or uid in approved_users: await main_menu(msg)
-    else:
-        await send_admin_request(uid)
-        await msg.answer("⏳ Adminlar tasdiqlashini kuting...")
+
+    if uid in ADMINS or uid in approved_users:
+        await main_menu(msg)
+        return
+
+    # 1️⃣ Foydalanuvchiga salomlashish va to‘lov haqida habar
+    kb = types.InlineKeyboardMarkup(row_width=1)
+    kb.add(
+        types.InlineKeyboardButton(
+            "💳 To‘lov qilish va admin bilan bog‘lanish",
+            url="https://t.me/akramjonov0101"  # bu yerga admin username yozing
+        )
+    )
+    await msg.answer(
+        "👋 Salom!\nBotdan foydalanish uchun avval admin bilan bog‘lanib to‘lov qilishingiz kerak.",
+        reply_markup=kb
+    )
+
+    # 2️⃣ Foydalanuvchi to‘lov qilgan bo‘lsa, sorov yuborish tugmasi
+    kb2 = types.InlineKeyboardMarkup()
+    kb2.add(types.InlineKeyboardButton("📩 Sorov yuborish", callback_data=f"send_request:{uid}"))
+    await msg.answer(
+        "To‘lov qilgan bo‘lsangiz, sorov yuborish tugmasini bosing:",
+        reply_markup=kb2
+    )
+
 
 # =====================================================
 # ================= 📱 RAQAMLAR (MULTI-USER SAFE + CODE RETRY) =======================
@@ -717,56 +773,72 @@ async def grp_back(call: types.CallbackQuery):
 # ================= ✉️ HABAR YUBORISH =================
 # =====================================================
 
-# Send loop: multi-user safe, shadow-ban check, statistikani yozadi
 async def send_loop(user_id: int, session: str, text: str, groups: list, interval: int):
+    """
+    Smart spam control bilan xabar yuborish loopi
+    - flood/shadow-ban avtomatik tekshiradi
+    - spamga yaqinlashsa kutadi
+    - intervalda yuborishni davom ettiradi
+    """
     client, lock = await get_client(session)
-
     if user_id not in running_clients:
         running_clients[user_id] = {}
     running_clients[user_id][session] = client
 
-    async def loop():
-        try:
-            while True:
-                for (gid,) in groups:
-
-                    if session in shadow_banned:
-                        await bot.send_message(user_id, f"⚠️ {session} shadow-ban bo‘lgan. To‘xtatildi.")
-                        running_tasks.get(user_id, {}).pop(session, None)
-                        return
-
-                    try:
-                        async with lock:
-                            await client.send_message(gid, text)
-
-                        # Statistika
-                        with db() as c:
-                            c.execute("""
-                                INSERT OR REPLACE INTO stats(session, group_id, messages_sent, last_sent)
-                                VALUES(?, ?, COALESCE((SELECT messages_sent FROM stats WHERE session=? AND group_id=?) + 1, 1), ?)
-                            """, (session, gid, session, gid, datetime.datetime.now().isoformat()))
-
-                        # Guruhlar orasida random delay
-                        await asyncio.sleep(random.randint(15, 30))
-
-                    except FloodWaitError as e:
-                        await asyncio.sleep(e.seconds + 5)
-                    except UserIsBlockedError:
-                        shadow_banned.add(session)
-                        await bot.send_message(user_id, f"⛔ {session} bloklandi. Task to‘xtatildi.")
-                        running_tasks.get(user_id, {}).pop(session, None)
-                        return
-                    except Exception as e:
-                        logging.error(f"[SEND ERROR] {session} -> {gid}: {e}")
-
-                await asyncio.sleep(interval * 60)
-
-        except asyncio.CancelledError:
-            logging.info(f"[STOPPED] user={user_id} session={session}")
-            return
-
     if user_id not in running_tasks:
         running_tasks[user_id] = {}
+
+    async def loop():
+        flood_count = 0
+        while True:
+            for (gid,) in groups:
+                # Agar session shadow-ban yoki spam xavfi bo‘lsa kutish
+                if session in shadow_banned:
+                    await bot.send_message(user_id, f"⚠️ {session} shadow-ban bo‘lgan. To‘xtatildi.")
+                    return
+
+                try:
+                    async with lock:
+                        await client.send_message(gid, text)
+
+                    # Statistika yozish
+                    with db() as c:
+                        c.execute("""
+                            INSERT OR REPLACE INTO stats(user_id, session, group_id, messages_sent, last_sent)
+                            VALUES(?, ?, ?, COALESCE((SELECT messages_sent FROM stats WHERE user_id=? AND session=? AND group_id=?) + 1, 1), ?)
+                        """, (user_id, session, gid, user_id, session, gid, datetime.datetime.now().isoformat()))
+
+                    # Normal interval kutish
+                    await asyncio.sleep(interval * 60)
+
+                except FloodWaitError as e:
+                    # Flood xatolik: avtomatik kutish
+                    flood_count += 1
+                    wait_time = e.seconds + 30  # qo‘shimcha 30 sekund kutish
+                    await bot.send_message(user_id, f"⚠️ Flood xavfi: {session} {wait_time}s kutiladi.")
+                    await asyncio.sleep(wait_time)
+                    if flood_count >= 3:
+                        shadow_banned.add(session)
+                        with db() as c:
+                            c.execute("INSERT OR IGNORE INTO shadow_banned(session) VALUES (?)", (session,))
+                        await bot.send_message(user_id, f"⚠️ {session} flood sababli avtomatik to‘xtatildi.")
+                        return
+
+                except UserIsBlockedError:
+                    shadow_banned.add(session)
+                    with db() as c:
+                        c.execute("INSERT OR IGNORE INTO shadow_banned(session) VALUES (?)", (session,))
+                    await bot.send_message(user_id, f"⛔ {session} bloklandi. Task to‘xtatildi.")
+                    return
+
+                except Exception as e:
+                    logging.error(f"[SEND ERROR] {session} -> {gid}: {e}")
+                    # Agar xato spam xavfiga o‘xshasa kutish
+                    await asyncio.sleep(random.randint(15, 30))
+
+            # Agar interval juda qisqa va spam xavfi yuqori bo‘lsa, avtomatik kutish
+            await asyncio.sleep(interval * 60)
+
     running_tasks[user_id][session] = asyncio.create_task(loop())
 
 
