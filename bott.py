@@ -108,39 +108,62 @@ DB = "bot.db"
 def db():
     return sqlite3.connect(DB, timeout=30)
 
-# DB yaratilishi va restartda approved_users / shadow_banned yuklanishi
+# DB yaratilishi va restartda ma'lumotlarni yuklash
 with db() as c:
-    # Numbers & groups & stats
-    c.execute("""CREATE TABLE IF NOT EXISTS numbers(
-        user_id INTEGER,
-        session TEXT
-    )""")
-    c.execute("""CREATE TABLE IF NOT EXISTS selected_groups(
-        user_id INTEGER,
-        session TEXT,
-        group_id INTEGER,
-        title TEXT
-    )""")
-    c.execute("""CREATE TABLE IF NOT EXISTS stats(
-        session TEXT,
-        group_id INTEGER,
-        messages_sent INTEGER,
-        last_sent TEXT
-    )""")
 
-    # Approved users jadvali
-    c.execute("""CREATE TABLE IF NOT EXISTS approved_users(
-        user_id INTEGER PRIMARY KEY
-    )""")
+    # 📱 Raqamlar
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS numbers(
+            user_id INTEGER,
+            session TEXT
+        )
+    """)
+
+    # 👥 Tanlangan guruhlar
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS selected_groups(
+            user_id INTEGER,
+            session TEXT,
+            group_id INTEGER,
+            title TEXT
+        )
+    """)
+
+    # 📊 Statistika (YANGILANGAN)
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS stats(
+            user_id INTEGER,
+            session TEXT,
+            group_id INTEGER,
+            messages_sent INTEGER,
+            last_sent TEXT
+        )
+    """)
+
+    # 🔧 ESKI DB UCHUN FIX (Railway xatosini tuzatadi)
+    try:
+        c.execute("ALTER TABLE stats ADD COLUMN user_id INTEGER")
+    except:
+        pass
+
+    # ✅ Tasdiqlangan userlar
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS approved_users(
+            user_id INTEGER PRIMARY KEY
+        )
+    """)
     rows = c.execute("SELECT user_id FROM approved_users").fetchall()
-    approved_users.update([r[0] for r in rows])
+    approved_users.update(r[0] for r in rows)
 
-    # Shadow-banned sessions jadvali
-    c.execute("""CREATE TABLE IF NOT EXISTS shadow_banned(
-        session TEXT PRIMARY KEY
-    )""")
+    # 🚫 Shadow-ban bo‘lgan sessionlar
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS shadow_banned(
+            session TEXT PRIMARY KEY
+        )
+    """)
     rows = c.execute("SELECT session FROM shadow_banned").fetchall()
-    shadow_banned.update([r[0] for r in rows])
+    shadow_banned.update(r[0] for r in rows)
+
 
 # ================= STATES =================
 class AddNum(StatesGroup):
@@ -832,9 +855,13 @@ async def send_loop(user_id: int, session: str, text: str, groups: list, interva
                     return
 
                 except Exception as e:
+                    if "invalid peer" in str(e).lower():
+                        logging.error(f"[INVALID PEER] {session} -> {gid}")
+                        continue
+
                     logging.error(f"[SEND ERROR] {session} -> {gid}: {e}")
-                    # Agar xato spam xavfiga o‘xshasa kutish
-                    await asyncio.sleep(random.randint(15, 30))
+                    await asyncio.sleep(20)
+
 
             # Agar interval juda qisqa va spam xavfi yuqori bo‘lsa, avtomatik kutish
             await asyncio.sleep(interval * 60)
