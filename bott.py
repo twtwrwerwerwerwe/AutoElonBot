@@ -94,7 +94,9 @@ async def get_client(sess: str):
         await client.connect()
 
         if not await client.is_user_authorized():
-            raise RuntimeError(f"Session {sess} avtorizatsiyadan o‘tmagan")
+            await client.disconnect()
+            raise PermissionError("NOT_AUTH")
+
 
         telethon_clients[sess] = client
         return client, telethon_locks[sess]
@@ -606,11 +608,28 @@ async def grp_session_menu(call: types.CallbackQuery):
 
 
 # ================= BARCHA GURUHLARNI OLISH (SAFE) =================
-async def fetch_all_groups(sess: str):
-    if sess in groups_cache:
-        return groups_cache[sess]
+async def fetch_all_groups(sess: str, user_id: int = None):
+    try:
+        client, lock = await get_client(sess)
+    except PermissionError:
+        # DB va cache tozalash
+        with db() as c:
+            c.execute("DELETE FROM numbers WHERE session=?", (sess,))
+            c.execute("DELETE FROM selected_groups WHERE session=?", (sess,))
+            c.execute("DELETE FROM stats WHERE session=?", (sess,))
 
-    client, lock = await get_client(sess)
+        groups_cache.pop(sess, None)
+        telethon_clients.pop(sess, None)
+        telethon_locks.pop(sess, None)
+
+        if user_id:
+            await bot.send_message(
+                user_id,
+                f"⚠️ Session {sess} avtorizatsiyadan chiqib ketgan.\n"
+                f"Iltimos, uni qayta qo‘shing."
+            )
+        return []
+
     async with lock:
         dialogs = []
         async for d in client.iter_dialogs():
@@ -622,6 +641,7 @@ async def fetch_all_groups(sess: str):
 
 
 
+
 # ================= GURUH QO‘SHISH (PAGINATION + SAFE) =================
 @dp.callback_query_handler(lambda c: c.data.startswith("grp_all:"))
 async def grp_all(call: types.CallbackQuery):
@@ -630,7 +650,11 @@ async def grp_all(call: types.CallbackQuery):
     page = int(parts[2])
     uid = call.from_user.id
 
-    all_groups = await fetch_all_groups(sess)
+    all_groups = await fetch_all_groups(sess, call.from_user.id)
+    if not all_groups:
+        await call.answer("❌ Session ishlamayapti", show_alert=True)
+        return
+
     # DB dan tanlangan guruhlarni olamiz
     uid = call.from_user.id
     with db() as c:
@@ -799,59 +823,94 @@ async def grp_back(call: types.CallbackQuery):
 async def send_loop(user_id: int, session: str, text: str, groups: list, interval: int):
     """
     Smart spam control bilan xabar yuborish loopi
-    - flood/shadow-ban avtomatik tekshiradi
-    - spamga yaqinlashsa kutadi
-    - intervalda yuborishni davom ettiradi
     """
-    client, lock = await get_client(session)
-    if user_id not in running_clients:
-        running_clients[user_id] = {}
-    running_clients[user_id][session] = client
+    try:
+        client, lock = await get_client(session)
+    except PermissionError:
+        await bot.send_message(
+            user_id,
+            f"❌ Session {session} avtorizatsiyadan chiqib ketgan.\n"
+            f"Iltimos, uni qayta qo‘shing."
+        )
+        return
 
-    if user_id not in running_tasks:
-        running_tasks[user_id] = {}
+    # Client va tasklarni ro‘yxatga olish
+    running_clients.setdefault(user_id, {})[session] = client
+    running_tasks.setdefault(user_id, {})
 
     async def loop():
         flood_count = 0
+
         while True:
             for (gid,) in groups:
-                # Agar session shadow-ban yoki spam xavfi bo‘lsa kutish
+
+                # Shadow-ban tekshiruv
                 if session in shadow_banned:
-                    await bot.send_message(user_id, f"⚠️ {session} shadow-ban bo‘lgan. To‘xtatildi.")
+                    await bot.send_message(
+                        user_id,
+                        f"⚠️ {session} shadow-ban bo‘lgan. Yuborish to‘xtatildi."
+                    )
                     return
 
                 try:
                     async with lock:
                         await client.send_message(gid, text)
 
-                    # Statistika yozish
+                    # Statistika
                     with db() as c:
                         c.execute("""
-                            INSERT OR REPLACE INTO stats(user_id, session, group_id, messages_sent, last_sent)
-                            VALUES(?, ?, ?, COALESCE((SELECT messages_sent FROM stats WHERE user_id=? AND session=? AND group_id=?) + 1, 1), ?)
-                        """, (user_id, session, gid, user_id, session, gid, datetime.datetime.now().isoformat()))
+                            INSERT OR REPLACE INTO stats
+                            (user_id, session, group_id, messages_sent, last_sent)
+                            VALUES (
+                                ?, ?, ?, 
+                                COALESCE(
+                                    (SELECT messages_sent FROM stats 
+                                     WHERE user_id=? AND session=? AND group_id=?) + 1,
+                                    1
+                                ),
+                                ?
+                            )
+                        """, (
+                            user_id, session, gid,
+                            user_id, session, gid,
+                            datetime.datetime.now().isoformat()
+                        ))
 
-                    # Normal interval kutish
                     await asyncio.sleep(interval * 60)
 
                 except FloodWaitError as e:
-                    # Flood xatolik: avtomatik kutish
                     flood_count += 1
-                    wait_time = e.seconds + 30  # qo‘shimcha 30 sekund kutish
-                    await bot.send_message(user_id, f"⚠️ Flood xavfi: {session} {wait_time}s kutiladi.")
+                    wait_time = e.seconds + 30
+                    await bot.send_message(
+                        user_id,
+                        f"⚠️ Flood xavfi ({session}) — {wait_time}s kutiladi."
+                    )
                     await asyncio.sleep(wait_time)
+
                     if flood_count >= 3:
                         shadow_banned.add(session)
                         with db() as c:
-                            c.execute("INSERT OR IGNORE INTO shadow_banned(session) VALUES (?)", (session,))
-                        await bot.send_message(user_id, f"⚠️ {session} flood sababli avtomatik to‘xtatildi.")
+                            c.execute(
+                                "INSERT OR IGNORE INTO shadow_banned(session) VALUES (?)",
+                                (session,)
+                            )
+                        await bot.send_message(
+                            user_id,
+                            f"⛔ {session} flood sababli avtomatik to‘xtatildi."
+                        )
                         return
 
                 except UserIsBlockedError:
                     shadow_banned.add(session)
                     with db() as c:
-                        c.execute("INSERT OR IGNORE INTO shadow_banned(session) VALUES (?)", (session,))
-                    await bot.send_message(user_id, f"⛔ {session} bloklandi. Task to‘xtatildi.")
+                        c.execute(
+                            "INSERT OR IGNORE INTO shadow_banned(session) VALUES (?)",
+                            (session,)
+                        )
+                    await bot.send_message(
+                        user_id,
+                        f"⛔ {session} bloklangan. Task to‘xtatildi."
+                    )
                     return
 
                 except Exception as e:
@@ -862,12 +921,9 @@ async def send_loop(user_id: int, session: str, text: str, groups: list, interva
                     logging.error(f"[SEND ERROR] {session} -> {gid}: {e}")
                     await asyncio.sleep(20)
 
-
-            # Agar interval juda qisqa va spam xavfi yuqori bo‘lsa, avtomatik kutish
             await asyncio.sleep(interval * 60)
 
     running_tasks[user_id][session] = asyncio.create_task(loop())
-
 
 # ================= START SEND FLOW =================
 @dp.message_handler(lambda m: m.text == "✉️ Habar yuborish")
