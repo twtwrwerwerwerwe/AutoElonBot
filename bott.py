@@ -77,29 +77,28 @@ telethon_locks = {}
 groups_cache = {}
 
 
-async def get_client(sess: str):
-    if sess not in telethon_locks:
-        telethon_locks[sess] = asyncio.Lock()
+clients = {}
+client_locks = {}
 
-    async with telethon_locks[sess]:
-        if sess in telethon_clients:
-            return telethon_clients[sess], telethon_locks[sess]
+async def get_client(session: str):
+    if session in clients:
+        return clients[session], client_locks[session]
 
-        client = TelegramClient(
-            f"{SESS_DIR}/{sess}",
-            API_ID,
-            API_HASH
-        )
+    client = TelegramClient(
+        f"sessions/{session}",
+        API_ID,
+        API_HASH
+    )
 
-        await client.connect()
+    await client.connect()
+    if not await client.is_user_authorized():
+        raise PermissionError("Session avtorizatsiyadan o‘tmagan")
 
-        if not await client.is_user_authorized():
-            await client.disconnect()
-            raise PermissionError("NOT_AUTH")
+    lock = asyncio.Lock()
+    clients[session] = client
+    client_locks[session] = lock
+    return client, lock
 
-
-        telethon_clients[sess] = client
-        return client, telethon_locks[sess]
 
 
 
@@ -704,7 +703,7 @@ async def grp_add(call: types.CallbackQuery):
     page = int(parts[3])
     uid = call.from_user.id
 
-    # TelegramClient bilan guruh nomini olish
+    # Guruh nomini olish
     client, lock = await get_client(sess)
     async with lock:
         ent = await client.get_entity(gid)
@@ -713,46 +712,24 @@ async def grp_add(call: types.CallbackQuery):
     # DB ga yozish
     with db() as c:
         c.execute(
-            "INSERT OR IGNORE INTO selected_groups (user_id, session, group_id, title) VALUES (?,?,?,?)",
+            "INSERT OR IGNORE INTO selected_groups (user_id, session, group_id, title) "
+            "VALUES (?, ?, ?, ?)",
             (uid, sess, gid, title)
         )
 
+    # Javob
     await call.answer("✅ Tanlandi")
 
-    # 🔥 MUHIM: Bu qatorni o‘chiramiz
-    # await call.message.edit_reply_markup(reply_markup=call.message.reply_markup)
-
-    # Keyingi sahifani ko‘rsatish
-    @dp.callback_query_handler(lambda c: c.data.startswith("grp_add:"))
-    async def grp_add(call: types.CallbackQuery):
-        parts = call.data.split(":")
-        sess = parts[1]
-        gid = int(parts[2])
-        page = int(parts[3])
-        uid = call.from_user.id  # endi bu hech qachon None bo‘lmaydi
-
-        # TelegramClient bilan guruh nomini olish
-        client, lock = await get_client(sess)
-        async with lock:
-            ent = await client.get_entity(gid)
-            title = (ent.title or "No name")[:30]
-
-        # DB ga yozish
-        with db() as c:
-            c.execute(
-                "INSERT OR IGNORE INTO selected_groups (user_id, session, group_id, title) VALUES (?,?,?,?)",
-                (uid, sess, gid, title)
-            )
-
-        # Foydalanuvchiga xabar
-        await call.answer("✅ Tanlandi")
-
-        # Tugmalarni yangilash (eski callback tugmalarini olib tashlash)
-        await call.message.edit_reply_markup()
-
-
-
-
+    # Tugmalarni yangilab, shu sahifani qayta chizish
+    await grp_all(
+        types.CallbackQuery(
+            id=call.id,
+            from_user=call.from_user,
+            chat_instance=call.chat_instance,
+            message=call.message,
+            data=f"grp_all:{sess}:{page}"
+        )
+    )
 
 
 
@@ -840,7 +817,7 @@ async def send_loop(user_id: int, session: str, text: str, groups: list, interva
 
     async def loop():
         flood_count = 0
-
+          
         while True:
             for (gid,) in groups:
 
@@ -1022,7 +999,13 @@ async def stop_all(msg: types.Message):
         task.cancel()
 
     # Barcha clientlarni uzish
-    clients = running_clients.pop(user_id, {})
+    user_clients = running_clients.pop(user_id, {})
+    for client in user_clients.values():
+        try:
+            await client.disconnect()
+        except:
+            pass
+
     for client in clients.values():
         try:
             await client.disconnect()
@@ -1043,6 +1026,41 @@ async def show_stats(msg):
         text += f"Session: {row[0]}\nGuruh: {row[1]}\nXabarlar: {row[2]}\nOxirgi yuborish: {row[3]}\n\n"
     await msg.answer(text or "📊 Statistika mavjud emas.")
 
+    # ================= SHUTDOWN =================
+
+async def shutdown(dp):
+    # running tasklar
+    for user_tasks in running_tasks.values():
+        for task in user_tasks.values():
+            task.cancel()
+
+    # send loop clientlar
+    for user_clients in running_clients.values():
+        for client in user_clients.values():
+            try:
+                await client.disconnect()
+            except:
+                pass
+
+    # global clientlar
+    for client in clients.values():
+        try:
+            await client.disconnect()
+        except:
+            pass
+
+    # login paytidagi clientlar
+    for user_clients in login_clients.values():
+        for client in user_clients.values():
+            try:
+                await client.disconnect()
+            except:
+                pass
+
 # ================= RUN =================
 if __name__ == "__main__":
-    executor.start_polling(dp, skip_updates=True)
+    executor.start_polling(
+        dp,
+        skip_updates=True,
+        on_shutdown=shutdown
+    )
