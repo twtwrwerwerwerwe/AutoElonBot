@@ -848,7 +848,7 @@ async def send_loop(user_id: int, session: str, text: str, interval: int):
                             datetime.datetime.now().isoformat()
                         ))
 
-                    await asyncio.sleep(random.randint(15, 35))
+                    await asyncio.sleep(random.randint(10, 20))
 
                 except FloodWaitError as e:
                     await asyncio.sleep(e.seconds + 10)
