@@ -77,29 +77,26 @@ telethon_locks = {}
 groups_cache = {}
 
 
+telethon_clients = {}
+telethon_locks = {}
+
 async def get_client(sess: str):
     if sess not in telethon_locks:
         telethon_locks[sess] = asyncio.Lock()
 
-    async with telethon_locks[sess]:
-        if sess in telethon_clients:
-            return telethon_clients[sess], telethon_locks[sess]
+    if sess in telethon_clients:
+        return telethon_clients[sess], telethon_locks[sess]
 
-        client = TelegramClient(
-            f"{SESS_DIR}/{sess}",
-            API_ID,
-            API_HASH
-        )
+    client = TelegramClient(f"{SESS_DIR}/{sess}", API_ID, API_HASH)
+    await client.connect()
 
-        await client.connect()
+    if not await client.is_user_authorized():
+        await client.disconnect()
+        raise PermissionError("NOT_AUTH")
 
-        if not await client.is_user_authorized():
-            await client.disconnect()
-            raise PermissionError("NOT_AUTH")
+    telethon_clients[sess] = client
+    return client, telethon_locks[sess]
 
-
-        telethon_clients[sess] = client
-        return client, telethon_locks[sess]
 
 
 
@@ -139,6 +136,16 @@ with db() as c:
             group_id INTEGER,
             messages_sent INTEGER,
             last_sent TEXT
+        )
+    """)
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS stats(
+            user_id INTEGER,
+            session TEXT,
+            group_id INTEGER,
+            messages_sent INTEGER DEFAULT 0,
+            last_sent TEXT,
+            PRIMARY KEY (user_id, session, group_id)
         )
     """)
 
@@ -302,6 +309,24 @@ async def start(msg):
     await msg.answer(
         "To‘lov qilgan bo‘lsangiz, sorov yuborish tugmasini bosing:",
         reply_markup=kb2
+    )
+
+# ================= ADMIN PANEL =================
+@dp.message_handler(commands=["admin"])
+async def admin_panel(msg: types.Message):
+    if msg.from_user.id not in ADMINS:
+        return
+
+    with db() as c:
+        users = c.execute("SELECT COUNT(DISTINCT user_id) FROM numbers").fetchone()[0]
+        sessions = c.execute("SELECT COUNT(*) FROM numbers").fetchone()[0]
+        groups = c.execute("SELECT COUNT(*) FROM selected_groups").fetchone()[0]
+
+    await msg.answer(
+        f"👑 ADMIN PANEL\n\n"
+        f"👤 Userlar: {users}\n"
+        f"📱 Sessionlar: {sessions}\n"
+        f"👥 Guruhlar: {groups}"
     )
 
 
@@ -719,42 +744,6 @@ async def grp_add(call: types.CallbackQuery):
 
     await call.answer("✅ Tanlandi")
 
-    # 🔥 MUHIM: Bu qatorni o‘chiramiz
-    # await call.message.edit_reply_markup(reply_markup=call.message.reply_markup)
-
-    # Keyingi sahifani ko‘rsatish
-    @dp.callback_query_handler(lambda c: c.data.startswith("grp_add:"))
-    async def grp_add(call: types.CallbackQuery):
-        parts = call.data.split(":")
-        sess = parts[1]
-        gid = int(parts[2])
-        page = int(parts[3])
-        uid = call.from_user.id  # endi bu hech qachon None bo‘lmaydi
-
-        # TelegramClient bilan guruh nomini olish
-        client, lock = await get_client(sess)
-        async with lock:
-            ent = await client.get_entity(gid)
-            title = (ent.title or "No name")[:30]
-
-        # DB ga yozish
-        with db() as c:
-            c.execute(
-                "INSERT OR IGNORE INTO selected_groups (user_id, session, group_id, title) VALUES (?,?,?,?)",
-                (uid, sess, gid, title)
-            )
-
-        # Foydalanuvchiga xabar
-        await call.answer("✅ Tanlandi")
-
-        # Tugmalarni yangilash (eski callback tugmalarini olib tashlash)
-        await call.message.edit_reply_markup()
-
-
-
-
-
-
 
 # ================= TANLANGAN GURUHLAR =================
 @dp.callback_query_handler(lambda c: c.data.startswith("grp_sel:"))
@@ -820,110 +809,51 @@ async def grp_back(call: types.CallbackQuery):
 # ================= ✉️ HABAR YUBORISH =================
 # =====================================================
 
-async def send_loop(user_id: int, session: str, text: str, groups: list, interval: int):
-    """
-    Smart spam control bilan xabar yuborish loopi
-    """
-    try:
-        client, lock = await get_client(session)
-    except PermissionError:
-        await bot.send_message(
-            user_id,
-            f"❌ Session {session} avtorizatsiyadan chiqib ketgan.\n"
-            f"Iltimos, uni qayta qo‘shing."
-        )
-        return
+async def send_loop(user_id: int, session: str, text: str, interval: int):
+    client, lock = await get_client(session)
 
-    # Client va tasklarni ro‘yxatga olish
-    running_clients.setdefault(user_id, {})[session] = client
     running_tasks.setdefault(user_id, {})
 
     async def loop():
-        flood_count = 0
+        while not asyncio.current_task().cancelled():
 
-        while True:
+            with db() as c:
+                groups = c.execute(
+                    "SELECT group_id FROM selected_groups WHERE user_id=? AND session=?",
+                    (user_id, session)
+                ).fetchall()
+
             for (gid,) in groups:
-
-                # Shadow-ban tekshiruv
-                if session in shadow_banned:
-                    await bot.send_message(
-                        user_id,
-                        f"⚠️ {session} shadow-ban bo‘lgan. Yuborish to‘xtatildi."
-                    )
-                    return
-
                 try:
                     async with lock:
                         await client.send_message(gid, text)
 
-                    # Statistika
                     with db() as c:
                         c.execute("""
-                            INSERT OR REPLACE INTO stats
-                            (user_id, session, group_id, messages_sent, last_sent)
-                            VALUES (
-                                ?, ?, ?, 
-                                COALESCE(
-                                    (SELECT messages_sent FROM stats 
-                                     WHERE user_id=? AND session=? AND group_id=?) + 1,
-                                    1
-                                ),
-                                ?
-                            )
+                            INSERT INTO stats (user_id, session, group_id, messages_sent, last_sent)
+                            VALUES (?, ?, ?, 1, ?)
+                            ON CONFLICT(user_id, session, group_id)
+                            DO UPDATE SET
+                                messages_sent = messages_sent + 1,
+                                last_sent = excluded.last_sent
                         """, (
-                            user_id, session, gid,
                             user_id, session, gid,
                             datetime.datetime.now().isoformat()
                         ))
 
-                    await asyncio.sleep(interval * 60)
+                    await asyncio.sleep(random.randint(15, 35))
 
                 except FloodWaitError as e:
-                    flood_count += 1
-                    wait_time = e.seconds + 30
-                    await bot.send_message(
-                        user_id,
-                        f"⚠️ Flood xavfi ({session}) — {wait_time}s kutiladi."
-                    )
-                    await asyncio.sleep(wait_time)
-
-                    if flood_count >= 3:
-                        shadow_banned.add(session)
-                        with db() as c:
-                            c.execute(
-                                "INSERT OR IGNORE INTO shadow_banned(session) VALUES (?)",
-                                (session,)
-                            )
-                        await bot.send_message(
-                            user_id,
-                            f"⛔ {session} flood sababli avtomatik to‘xtatildi."
-                        )
-                        return
-
-                except UserIsBlockedError:
-                    shadow_banned.add(session)
-                    with db() as c:
-                        c.execute(
-                            "INSERT OR IGNORE INTO shadow_banned(session) VALUES (?)",
-                            (session,)
-                        )
-                    await bot.send_message(
-                        user_id,
-                        f"⛔ {session} bloklangan. Task to‘xtatildi."
-                    )
-                    return
+                    await asyncio.sleep(e.seconds + 10)
 
                 except Exception as e:
-                    if "invalid peer" in str(e).lower():
-                        logging.error(f"[INVALID PEER] {session} -> {gid}")
-                        continue
-
-                    logging.error(f"[SEND ERROR] {session} -> {gid}: {e}")
-                    await asyncio.sleep(20)
+                    logging.error(f"[SEND ERROR] {session} {gid}: {e}")
+                    await asyncio.sleep(10)
 
             await asyncio.sleep(interval * 60)
 
     running_tasks[user_id][session] = asyncio.create_task(loop())
+
 
 # ================= START SEND FLOW =================
 @dp.message_handler(lambda m: m.text == "✉️ Habar yuborish")
@@ -1004,7 +934,7 @@ async def start_sending(msg: types.Message, state: FSMContext):
         return
 
     # Taskni ishga tushurish
-    await send_loop(user_id, session, text, groups, interval)
+    await send_loop(user_id, session, text, interval)
     await state.finish()
     await msg.answer("▶️ Yuborish boshlandi")
     await main_menu(msg)
@@ -1037,11 +967,21 @@ async def stop_all(msg: types.Message):
 @dp.message_handler(lambda m: m.text == "📊 Statistika")
 async def show_stats(msg):
     with db() as c:
-        rows = c.execute("SELECT session, group_id, messages_sent, last_sent FROM stats").fetchall()
+        rows = c.execute(
+            "SELECT session, group_id, messages_sent, last_sent FROM stats WHERE user_id=?",
+            (msg.from_user.id,)
+        ).fetchall()
+
+    if not rows:
+        await msg.answer("📊 Statistika yo‘q")
+        return
+
     text = "📊 Statistika:\n\n"
-    for row in rows:
-        text += f"Session: {row[0]}\nGuruh: {row[1]}\nXabarlar: {row[2]}\nOxirgi yuborish: {row[3]}\n\n"
-    await msg.answer(text or "📊 Statistika mavjud emas.")
+    for s, g, m, l in rows:
+        text += f"📱 {s}\n👥 {g}\n✉️ {m}\n🕒 {l}\n\n"
+
+    await msg.answer(text)
+
 
 # ================= RUN =================
 if __name__ == "__main__":
