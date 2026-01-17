@@ -314,6 +314,7 @@ async def start(msg):
     kb2 = types.InlineKeyboardMarkup()
     kb2.add(types.InlineKeyboardButton("📩 Sorov yuborish", callback_data=f"send_request:{uid}"))
     await msg.answer(
+        "Oldindan aytib qo'yamiz akauntgizga nimadur bo'lsa admin javobgar emas. " \
         "To‘lov qilgan bo‘lsangiz, sorov yuborish tugmasini bosing:",
         reply_markup=kb2
     )
