@@ -107,47 +107,54 @@ DB = "bot.db"
 def db():
     return sqlite3.connect(DB, timeout=30)
 
-# DB yaratilishi va restartda ma'lumotlarni yuklash
 with db() as c:
 
-    # 📱 Raqamlar
+    # 📱 Raqamlar (user → sessionlar)
     c.execute("""
-        CREATE TABLE IF NOT EXISTS numbers(
-            user_id INTEGER,
-            session TEXT
+        CREATE TABLE IF NOT EXISTS numbers (
+            user_id INTEGER NOT NULL,
+            session TEXT NOT NULL,
+            PRIMARY KEY (user_id, session)
         )
     """)
 
     # 👥 Tanlangan guruhlar
     c.execute("""
-        CREATE TABLE IF NOT EXISTS selected_groups(
-            user_id INTEGER,
-            session TEXT,
-            group_id INTEGER,
-            title TEXT
+        CREATE TABLE IF NOT EXISTS selected_groups (
+            user_id INTEGER NOT NULL,
+            session TEXT NOT NULL,
+            group_id INTEGER NOT NULL,
+            title TEXT,
+            PRIMARY KEY (user_id, session, group_id)
         )
     """)
 
-    # 📊 Statistika (YANGILANGAN)
+    # 📊 Statistika (ON CONFLICT UCHUN TO‘G‘RI)
     c.execute("""
-        CREATE TABLE IF NOT EXISTS stats(
-            user_id INTEGER,
-            session TEXT,
-            group_id INTEGER,
-            messages_sent INTEGER,
-            last_sent TEXT
-        )
-    """)
-    c.execute("""
-        CREATE TABLE IF NOT EXISTS stats(
-            user_id INTEGER,
-            session TEXT,
-            group_id INTEGER,
+        CREATE TABLE IF NOT EXISTS stats (
+            user_id INTEGER NOT NULL,
+            session TEXT NOT NULL,
+            group_id INTEGER NOT NULL,
             messages_sent INTEGER DEFAULT 0,
             last_sent TEXT,
             PRIMARY KEY (user_id, session, group_id)
         )
     """)
+
+    # ✅ Tasdiqlangan userlar
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS approved_users (
+            user_id INTEGER PRIMARY KEY
+        )
+    """)
+
+    # 🚫 Shadow-ban bo‘lgan sessionlar
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS shadow_banned (
+            session TEXT PRIMARY KEY
+        )
+    """)
+
 
     # 🔧 ESKI DB UCHUN FIX (Railway xatosini tuzatadi)
     try:
@@ -435,7 +442,7 @@ async def get_phone(msg: types.Message, state: FSMContext):
         kb.add("🔁 Kodni qayta yuborish", "⬅️ Orqaga")
 
         await AddNum.code.set()
-        await msg.answer("📨 SMS kodni kiriting:", reply_markup=kb)
+        await msg.answer("📨 SMS kod yuborildi. SMS kodni 12.345 nuqta bilan kiring!:", reply_markup=kb)
 
     except Exception as e:
         await msg.answer(f"❌ Kod yuborilmadi:\n{e}")
